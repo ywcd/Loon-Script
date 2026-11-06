@@ -1,7 +1,7 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.1 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.2 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -79,7 +79,7 @@ function readArgument() {
 const ARG = readArgument();
 
 const CFG = {
-  version: 'harvest-1.1',
+  version: 'harvest-1.2',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
@@ -99,6 +99,32 @@ const CFG = {
 };
 
 const NOW = Date.now();
+
+/* ============================================================
+ * 配置版本自检 —— 防止「脚本更新了但配置没重贴」
+ *
+ * 配置的 argument= 里要带 cfgv=N。改了域名清单 / 参数结构就 +1。
+ * 不一致只提醒，不阻断采集（旧配置多半还能用）。
+ * 提醒 6 小时内只发一次，免得每次开 App 都弹。
+ * ============================================================ */
+const CFG_VER = 2;
+function checkCfgVersion() {
+  const got = parseInt(ARG.cfgv || ARG.CFGV || '0', 10) || 0;
+  if (got >= CFG_VER) return;
+  const K = 'cfgwarn_ts';
+  const last = parseInt(prefGet(K, '0') || '0', 10) || 0;
+  if (NOW - last < 6 * 3600 * 1000) return;
+  prefSet(K, String(NOW));
+  const detail = got === 0
+    ? '你的配置是老版本（没有 cfgv 标记），可能缺新域名或新参数'
+    : '你的配置 cfgv=' + got + '，当前需要 ' + CFG_VER;
+  log('cfg-version | 需要 ' + CFG_VER + '，实际 ' + got + ' | 提醒更新配置');
+  try {
+    $notification.post('采集器配置该更新了', detail,
+      '找 AI 要新的 Loon 配置，重贴 [Script] 和 [Mitm] 两段');
+  } catch (e) { /* 通知失败不影响采集 */ }
+}
+
 
 /* ============================================================
  * 平台表 —— 以后加平台只改这里
@@ -820,6 +846,7 @@ function main() {
 }
 
 try {
+  checkCfgVersion();   /* 配置版本对不上就提醒一次，不阻断采集 */
   main();
 } catch (e) {
   log('crash | ' + (e && e.message ? e.message : e));
