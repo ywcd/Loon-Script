@@ -1,7 +1,7 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.3 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.4 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -79,7 +79,7 @@ function readArgument() {
 const ARG = readArgument();
 
 const CFG = {
-  version: 'harvest-1.3',
+  version: 'harvest-1.4',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
@@ -567,27 +567,38 @@ function handleTaobao(ctx) {
     });
   }
 
-  /* ② ele.me / 淘宝域 cookie → TB_LUCKYSTAR_ACCOUNTS（标识#cookie） */
-  const ck = ctx.cookie;
-  const keys = Object.keys(ck);
-  if (keys.length < 3) return jobs;
-
-  const id = ck['unb'] || ck['munb'] || ck['USERID'] || ck['userId'] || ck['_tb_token_'] || '';
-  if (!id) return jobs;
-
-  const cookieStr = serializeCookie(ck);
-  jobs.push({
-    env: 'TB_LUCKYSTAR_ACCOUNTS', pin: id, cron: 0, note: 'cookie',
-    build: function (old) {
-      const rows = splitLines(old);
-      let hit = null;
-      for (let i = 0; i < rows.length; i++) if (rows[i].pin === id) { hit = rows[i]; break; }
-      /* 新值优先：`_tb_token_` / `cookie2` / `_m_h5_tk` 都是会轮换的凭证，
-         用「指纹键保留」会把旧票永远钉住，领奖直接失效。 */
-      const merged = hit ? mergeCookiePreferNew(hit.cookie, ck) : cookieStr;
-      return upsertRow(old, id, merged);
-    },
-  });
+  /* ② TB_LUCKYSTAR_ACCOUNTS —— ⚠️ 默认【不写】！
+   *
+   * 11-06 实测踩到的坑：闪购要的是 ele.me 会话票，其中 `_m_h5_tk` 是 mtop 签名 token，
+   * 每次请求后由 **Set-Cookie** 下发新值。Loon 的 http-request 类型**拿不到响应头**，
+   * 只能抓到请求里带的旧 token —— 写进面板会把 ActivityHub 扫码产的新票覆盖成旧的，
+   * 表现就是 176 任务秒失败（0.1s / NET_ERROR / 登录态失效），而票「看起来」33 个键全在。
+   *
+   * 所以淘宝票交给 ActivityHub（完整浏览器，能拿最新 _m_h5_tk），Loon 只抓 x-umt。
+   * 真要开：argument 里加 tbcookie=1
+   */
+  if (String(ARG.tbcookie || ARG.TBCOOKIE || '') === '1') {
+    const ck = ctx.cookie;
+    const keys = Object.keys(ck);
+    if (keys.length >= 3) {
+      const id = ck['unb'] || ck['munb'] || ck['USERID'] || ck['userId'] || ck['_tb_token_'] || '';
+      if (id) {
+        const cookieStr = serializeCookie(ck);
+        jobs.push({
+          env: 'TB_LUCKYSTAR_ACCOUNTS', pin: id, cron: 0, note: 'cookie',
+          build: function (old) {
+            const rows = splitLines(old);
+            let hit = null;
+            for (let i = 0; i < rows.length; i++) if (rows[i].pin === id) { hit = rows[i]; break; }
+            const merged = hit ? mergeCookiePreferNew(hit.cookie, ck) : cookieStr;
+            return upsertRow(old, id, merged);
+          },
+        });
+      }
+    }
+  } else {
+    dbg('taobao | 跳过 cookie（tbcookie≠1）—— 淘宝票交给 ActivityHub，Loon 只管 x-umt');
+  }
   return jobs;
 }
 
