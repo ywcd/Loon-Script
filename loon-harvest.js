@@ -1,7 +1,7 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.2 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.3 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -79,7 +79,7 @@ function readArgument() {
 const ARG = readArgument();
 
 const CFG = {
-  version: 'harvest-1.2',
+  version: 'harvest-1.3',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
@@ -95,7 +95,7 @@ const CFG = {
   pushCooldown: 30 * 60 * 1000,   // 同一身份 30 分钟内不重复写
   tokenTTL: 20 * 60 * 1000,       // 青龙 token 本地缓存
   timeout: 15000,                 // 单次 HTTP 超时，绝不静默挂住
-  debug: false,
+  debug: /^(1|true|yes|on)$/i.test(String(ARG.debug || ARG.DEBUG || '')),
 };
 
 const NOW = Date.now();
@@ -555,6 +555,7 @@ function handleJd(ctx) {
 
 /* ── 淘宝 / 饿了么 / 闪购 ──────────────────────────────── */
 function handleTaobao(ctx) {
+    dbg('taobao | ' + (ctx.url || '').slice(0, 88) + ' ｜ cookie ' + Object.keys(ctx.cookie || {}).length + ' 键' + (getHeader(reqHeaders, 'x-umt') ? ' ｜ x-umt ' + getHeader(reqHeaders, 'x-umt').length + ' 字符' : ''));
   const jobs = [];
 
   /* ① x-umt 设备头 —— 幸运星领奖必须要它，这是唯一能拿到真值的地方 */
@@ -592,6 +593,7 @@ function handleTaobao(ctx) {
 
 /* ── 闲鱼 ─────────────────────────────────────────────── */
 function handleXianyu(ctx) {
+    dbg('xianyu | ' + (ctx.url || '').slice(0, 88) + ' ｜ cookie ' + Object.keys(ctx.cookie || {}).length + ' 键' + (getHeader(reqHeaders, 'x-umt') ? ' ｜ x-umt ' + getHeader(reqHeaders, 'x-umt').length + ' 字符' : ''));
   const ck = ctx.cookie;
   const unb = ck['unb'] || ck['munb'] || '';
   if (!unb) return [];
@@ -616,11 +618,17 @@ function handleXianyu(ctx) {
 function handleUnicom(ctx) {
   /* token 在请求头，appId 在 query，手机号藏在 UA 的 desmobile 里 */
   const token = getHeader(reqHeaders, 'token') || getHeader(reqHeaders, 'token_online');
-  if (!token || String(token).length < 16) return [];
+    if (!token || String(token).length < 16) {
+      dbg('unicom | 缺 token 头（拿到 ' + String(token || '').length + ' 字符）| ' + (ctx.url || '').slice(0, 90));
+      return [];
+    }
 
   const appId = paramOf(ctx.url, ctx.body, 'appId') || paramOf(ctx.url, ctx.body, 'appid')
              || paramOf(ctx.url, ctx.body, 'app_id') || '';
-  if (!appId || appId.length < 20) return [];
+    if (!appId || appId.length < 20) {
+      dbg('unicom | 缺 appId（拿到 ' + String(appId || '').length + ' 字符）| ' + (ctx.url || '').slice(0, 90));
+      return [];
+    }
 
   let phone = '';
   const ua = getHeader(reqHeaders, 'user-agent') || '';
@@ -631,7 +639,10 @@ function handleUnicom(ctx) {
     const q = queryOf(ctx.url, 'desmobile');
     if (/^1\d{10}$/.test(q)) phone = q;
   }
-  if (!phone) return [];
+    if (!phone) {
+      dbg('unicom | 缺 desmobile 手机号 | UA=' + ua.slice(0, 60));
+      return [];
+    }
 
   const line = token + '#' + appId + '#' + phone;
   return [{
@@ -666,6 +677,7 @@ function handleUnicom(ctx) {
 
 /* ── 值得买 ───────────────────────────────────────────── */
 function handleSmzdm(ctx) {
+    dbg('smzdm | ' + (ctx.url || '').slice(0, 88) + ' ｜ cookie ' + Object.keys(ctx.cookie || {}).length + ' 键' + (getHeader(reqHeaders, 'x-umt') ? ' ｜ x-umt ' + getHeader(reqHeaders, 'x-umt').length + ' 字符' : ''));
   const ck = ctx.cookie;
   /* 值得买的关键键：sess / user / smzdm_id */
   if (!ck['sess'] && !ck['user']) return [];
