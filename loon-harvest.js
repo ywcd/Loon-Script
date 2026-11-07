@@ -875,3 +875,5 @@ try {
   log('crash | ' + (e && e.message ? e.message : e));
   finish();
 }
+
+// publish-path-test 20261108
