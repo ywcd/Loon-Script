@@ -576,7 +576,18 @@ function handleJd(ctx) {
     _h('build'),
     _h('clientversion') || _h('client-version'),
   ];
-  const devOk = dev[1] && dev[2] && dev[3] && dev[8];   /* uuid + eid + wg + client 是硬门槛 */
+  /* 2026-11-10 修：原来要求 client_version 必须有，但京东的 clientVersion
+     多数请求**没有独立头**（README 也说「可以从 jdapp UA 取」）→ 门槛过不了 →
+     JD_DEVICE 永远不写。现在改成：uuid+eid+wg 三个是硬门槛，
+     build / clientVersion 缺了就从 UA 里解析补上。 */
+  const _ua = dev[0] || '';
+  const _mb = /appBuild\/(\d+)/.exec(_ua);
+  if (!dev[7] && _mb) dev[7] = _mb[1];                         /* build */
+  if (!dev[8]) {
+    const _mv = /jdapp;[^;]*;\s*([0-9][0-9.]*)/.exec(_ua) || /appVersion\/([0-9.]+)/.exec(_ua);
+    if (_mv) dev[8] = _mv[1];
+  }
+  const devOk = dev[1] && dev[2] && dev[3];   /* uuid + eid + wg 才是风控三件套 */
   if (devOk) {
     const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
     jobs.push({
