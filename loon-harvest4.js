@@ -455,12 +455,19 @@ function runCron(tok, id) {
  *    所有行格式变量的格式都含 #（pin#cookie / 标识#cookie / token#appid#手机号），
  *    所以这条过滤是安全的。
  */
+/* ★ 2026-11-11 修：原来 `s.indexOf('#') > 0` 只认 pin#cookie，
+ * 遇到「完整格式」（pt_key=…;pt_pin=xxx;User-Agent=…，没有 # 前缀）会**整行丢弃** →
+ * splitLines 返回空 → upsertRow 只 push 一行 → joinLines 把整个变量重写成 1 个号。
+ * 实测后果：JD_COOKIE 2 个号被冲成 1 个（丢了 jd_gRIbMNmiwoGv）。
+ * 现在两种格式都认：有 # 走老路，没有就从 pt_pin= 取 pin。 */
 function splitLines(value) {
   return String(value || '').split('\n').map(function (s) { return s.trim(); })
-    .filter(function (s) { return s && s.indexOf('#') > 0; })
+    .filter(function (s) { return s && (s.indexOf('#') > 0 || /(?:^|;)\s*pt_pin=/.test(s)); })
     .map(function (line) {
       const i = line.indexOf('#');
-      return { pin: line.slice(0, i).trim(), cookie: line.slice(i + 1).trim() };
+      if (i > 0) return { pin: line.slice(0, i).trim(), cookie: line.slice(i + 1).trim() };
+      const m = /(?:^|;)\s*pt_pin=([^;]+)/.exec(line);
+      return { pin: m ? m[1].trim() : '', cookie: line };
     });
 }
 
