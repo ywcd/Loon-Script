@@ -107,7 +107,7 @@ const NOW = Date.now();
  * 不一致只提醒，不阻断采集（旧配置多半还能用）。
  * 提醒 6 小时内只发一次，免得每次开 App 都弹。
  * ============================================================ */
-const CFG_VER = 2;
+const CFG_VER = 3;
 function checkCfgVersion() {
   const got = parseInt(ARG.cfgv || ARG.CFGV || '0', 10) || 0;
   if (got >= CFG_VER) return;
@@ -548,6 +548,44 @@ function handleJd(ctx) {
       cron: ptKey ? 0 : CFG.cron.jdConvert,
       note: 'wskey',
       build: function (old) { return upsertRow(old, pin, wskey); },
+    });
+  }
+
+  /* ③ JD_DEVICE —— 手机端 App 的设备指纹（2026-11-10 加）
+   *
+   * 为什么需要：新版京东活动脚本（JDOOOK 那套）要求 JD_COOKIE 里带
+   *   user_agent / uuid / x-api-eid-token / wg-sdk-token / d_brand / d_model /
+   *   osVersion / build / clientVersion —— 缺一项就跳过账号。
+   * 这些**只能从 api.m.jd.com 的请求头拿到**，网页版 Cookie 里没有。
+   *
+   * 为什么不直接写进 JD_COOKIE：任务 172（sync_jd_cookie.py）按 `pin#cookie`
+   *   两段解析，追加字段会把它的 cookie 段搞坏。所以单独一个变量，
+   *   由启动器拼成完整格式再用。
+   *
+   * 值格式：pin#user_agent#uuid#eid_token#wg_token#d_brand#d_model#os_version#build#client_version
+   */
+  const _h = function (n) { return getHeader(reqHeaders, n) || ''; };
+  const dev = [
+    _h('user-agent'),
+    _h('uuid'),
+    _h('x-api-eid-token'),
+    _h('wg-sdk-token'),
+    _h('d_brand') || _h('d-brand'),
+    _h('d_model') || _h('d-model'),
+    _h('osversion') || _h('os-version'),
+    _h('build'),
+    _h('clientversion') || _h('client-version'),
+  ];
+  const devOk = dev[1] && dev[2] && dev[3] && dev[8];   /* uuid + eid + wg + client 是硬门槛 */
+  if (devOk) {
+    const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
+    jobs.push({
+      env: 'JD_DEVICE', pin: pin, cron: 0, note: '设备指纹',
+      build: function (old) {
+        const cur = splitLines(old).find(function (r) { return r.pin === pin; });
+        if (cur && String(cur.cookie || '') === row) return null;   /* 没变就不写，省一次面板请求 */
+        return upsertRow(old, pin, row);
+      },
     });
   }
   return jobs;
