@@ -92,6 +92,21 @@ const CFG = {
     jdConvert: 180,     // 京东-Wskey换CK
   },
 
+  /* ★ 2026-11-10 v6：设备指纹的「配置兜底」。
+     抓包能拿到就用抓到的（新鲜），拿不到就用这里写的（一劳永逸，不用每次重抓）。
+     由 .lcf 的 argument 传进来：jduuid / jdeid / jdbrand / jdmodel / jdos / jdbuild / jdclient
+     UA 不传，脚本用上面几个字段自动拼成 jdapp; 格式。 */
+  jdDev: {
+    uuid:   String(ARG.jduuid   || ARG.JDUUID   || '').trim(),
+    eid:    String(ARG.jdeid    || ARG.JDEID    || '').trim(),
+    wg:     String(ARG.jdwg     || ARG.JDWG     || '').trim(),
+    brand:  String(ARG.jdbrand  || ARG.JDBRAND  || '').trim(),
+    model:  String(ARG.jdmodel  || ARG.JDMODEL  || '').trim(),
+    os:     String(ARG.jdos     || ARG.JDOS     || '').trim(),
+    build:  String(ARG.jdbuild  || ARG.JDBUILD  || '').trim(),
+    client: String(ARG.jdclient || ARG.JDCLIENT || '').trim(),
+  },
+
   pushCooldown: 30 * 60 * 1000,   // 同一身份 30 分钟内不重复写
   tokenTTL: 20 * 60 * 1000,       // 青龙 token 本地缓存
   timeout: 15000,                 // 单次 HTTP 超时，绝不静默挂住
@@ -585,21 +600,92 @@ function handleJd(ctx) {
    * 值格式：pin#user_agent#uuid#eid_token#wg_token#d_brand#d_model#os_version#build#client_version
    */
   const _h = function (n) { return getHeader(reqHeaders, n) || ''; };
+  /* ★ 2026-11-10：设备指纹多数**不在请求头里，而在 URL 查询串里**。
+     实测 sh.jd.com/d?fl=...&x-api-eid-token=jdd01...&uuid=...&d_brand=apple…
+     只读 headers 会永远采不到（这就是 JD_DEVICE 一直空的原因）。
+     这里同时解析 query，头优先、query 兜底。 */
+  const _q = (function (url) {
+    const out = {};
+    const s = String(url || '');
+    const i = s.indexOf('?');
+    if (i < 0) return out;
+    s.slice(i + 1).split('&').forEach(function (kv) {
+      if (!kv) return;
+      const j = kv.indexOf('=');
+      const k = (j < 0 ? kv : kv.slice(0, j)).toLowerCase();
+      let v = j < 0 ? '' : kv.slice(j + 1);
+      try { v = decodeURIComponent(v); } catch (e) {}
+      if (k && out[k] === undefined) out[k] = v;
+    });
+    return out;
+  })(ctx.url);
+  const _d = function () {
+    for (let i = 0; i < arguments.length; i++) {
+      const k = arguments[i];
+      const hv = _h(k);
+      if (hv) return hv;
+      const qv = _q[k.toLowerCase()];
+      if (qv) return qv;
+    }
+    return '';
+  };
+  /* 抓包优先；抓不到就用配置里写死的兜底（CFG.jdDev） */
+  const _C = CFG.jdDev || {};
+  const _pick = function (live, fallback) { return live || fallback || ''; };
   const dev = [
-    _h('user-agent'),
-    _h('uuid'),
-    _h('x-api-eid-token'),
-    _h('wg-sdk-token'),
-    _h('d_brand') || _h('d-brand'),
-    _h('d_model') || _h('d-model'),
-    _h('osversion') || _h('os-version'),
-    _h('build'),
-    _h('clientversion') || _h('client-version'),
+    _d('user-agent'),
+    _pick(_d('uuid'), _C.uuid),
+    _pick(_d('x-api-eid-token'), _C.eid),
+    _pick(_d('wg-sdk-token'), _C.wg),
+    _pick(_d('d_brand', 'd-brand', 'brand'), _C.brand),
+    _pick(_d('d_model', 'd-model', 'model'), _C.model),
+    _pick(_d('osversion', 'os-version', 'osVersion'), _C.os),
+    _pick(_d('build'), _C.build),
+    _pick(_d('clientversion', 'client-version', 'clientVersion'), _C.client),
   ];
   /* 2026-11-10 修：原来要求 client_version 必须有，但京东的 clientVersion
      多数请求**没有独立头**（README 也说「可以从 jdapp UA 取」）→ 门槛过不了 →
      JD_DEVICE 永远不写。现在改成：uuid+eid+wg 三个是硬门槛，
      build / clientVersion 缺了就从 UA 里解析补上。 */
+  /* uuid 在部分抓包里是 base64 密文（如 hjudwgohxzVu96krv/T6Hg==），
+     JDOOK 只收明文 hex。16 字节 base64 解出来正好 32 位 hex。 */
+  (function () {
+    const u = dev[1] || '';
+    if (/^[0-9a-f]{32}$/i.test(u)) return;                 /* 已经是明文 */
+    if (!/^[A-Za-z0-9+/=]{20,28}$/.test(u)) return;        /* 不像 base64 */
+    try {
+      const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      let bits = '', out = '';
+      for (let i = 0; i < u.length; i++) {
+        const ch = u[i];
+        if (ch === '=') break;
+        const idx = A.indexOf(ch);
+        if (idx < 0) return;
+        bits += ('000000' + idx.toString(2)).slice(-6);
+      }
+      for (let i = 0; i + 8 <= bits.length; i += 8) {
+        out += ('0' + parseInt(bits.slice(i, i + 8), 2).toString(16)).slice(-2);
+      }
+      if (out.length === 32) dev[1] = out;
+    } catch (e) {}
+  })();
+
+  /* UA 兜底：抓包里常是 JD4iPhone 老格式，配置里不传 UA，
+     这里用 client/build/os/brand/model/uuid 拼成脚本认的 jdapp; 格式。 */
+  if (!dev[0] || !/^jdapp;/i.test(dev[0])) {
+    if (dev[8] && dev[1]) {
+      const _osu = String(dev[6] || '18.0').replace(/\./g, '_');
+      dev[0] = ('jdapp;iPhone;%s;;;M/5.0;appBuild/%s;jdSupportDarkMode/0;'
+        + 'Mozilla/5.0 (iPhone; CPU iPhone OS %s like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Mobile/15E148;supportJDSHWK/1;uuid=%s;osVersion=%s;'
+        + 'd_brand=%s;d_model=%s')
+        .replace('%s', dev[8]).replace('%s', dev[7] || '171195')
+        .replace('%s', _osu).replace('%s', dev[1])
+        .replace('%s', dev[6] || '18.0').replace('%s', dev[4] || 'apple')
+        .replace('%s', dev[5] || 'iPhone');
+    }
+  }
+
   const _ua = dev[0] || '';
   const _mb = /appBuild\/(\d+)/.exec(_ua);
   if (!dev[7] && _mb) dev[7] = _mb[1];                         /* build */
@@ -607,6 +693,11 @@ function handleJd(ctx) {
     const _mv = /jdapp;[^;]*;\s*([0-9][0-9.]*)/.exec(_ua) || /appVersion\/([0-9.]+)/.exec(_ua);
     if (_mv) dev[8] = _mv[1];
   }
+  /* ★ 2026-11-10 实测：京东的 x-api-eid-token 与 wg-sdk-token 都是 jdd01 开头、
+     长度 116，抓包里往往只有前者。JDOOK 那套硬要 wg，实测拿 eid 顶上去它能接受
+     （任务真的跑起来了）。所以 wg 缺失时用 eid 兜底。 */
+  if (!dev[3] && dev[2]) dev[3] = dev[2];
+
   const devOk = dev[1] && dev[2] && dev[3];   /* uuid + eid + wg 才是风控三件套 */
   if (devOk) {
     const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
