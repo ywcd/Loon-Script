@@ -516,6 +516,26 @@ function countKeys(s) {
 
 /* ── 京东 ─────────────────────────────────────────────── */
 function handleJd(ctx) {
+  /* ★ 2026-11-10 诊断（放在最前面，任何 early-return 之前都会写）：
+     把 api.m.jd.com 上带的请求头名字记到 JD_HEADERS（只记名字，不含值）。
+     有了它就能判断：是「规则没触发」还是「头里没有 eid/wg」。 */
+  const _probe = (function () {
+    try {
+      const names = Object.keys(reqHeaders || {}).map(function (k) { return String(k).toLowerCase(); }).sort();
+      if (!names.length) return [];
+      const v = names.join(',');
+      const url = String(ctx.url || '').slice(0, 60);
+      return [{
+        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断',
+        build: function (old) {
+          const cur = String(old || '').trim();
+          if (cur === v) return null;
+          return v;
+        },
+      }];
+    } catch (e) { return []; }
+  })();
+
   const ck = ctx.cookie;
   const pin = ck['pt_pin'] || '';
   const ptKey = ck['pt_key'] || ck['light_key'] || '';
@@ -523,9 +543,9 @@ function handleJd(ctx) {
   if (!validPin(pin)) {
     /* 说清楚是「挡掉了」而不是「没抓到」，不然排查时一头雾水 */
     if (pin) log('jd | pin 被黑名单/格式挡掉：' + pin + '（京东测试账号会污染真实 pin）');
-    return [];
+    return _probe;
   }
-  if (!ptKey && !wskey) return [];
+  if (!ptKey && !wskey) return _probe;
 
   const jobs = [];
   if (ptKey) {
@@ -587,21 +607,6 @@ function handleJd(ctx) {
     const _mv = /jdapp;[^;]*;\s*([0-9][0-9.]*)/.exec(_ua) || /appVersion\/([0-9.]+)/.exec(_ua);
     if (_mv) dev[8] = _mv[1];
   }
-  /* 诊断：把 api.m.jd.com 上有哪些请求头记下来（只记名字，不含值）。
-     采不到 JD_DEVICE 时看 JD_HEADERS 就知道是「头不存在」还是「字段名猜错」。 */
-  try {
-    const names = Object.keys(reqHeaders || {}).map(function (k) { return String(k).toLowerCase(); }).sort();
-    if (names.length) {
-      jobs.push({
-        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断',
-        build: function (old) {
-          const v = names.join(',');
-          return v === String(old || '').trim() ? null : v;
-        },
-      });
-    }
-  } catch (e) {}
-
   const devOk = dev[1] && dev[2] && dev[3];   /* uuid + eid + wg 才是风控三件套 */
   if (devOk) {
     const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
