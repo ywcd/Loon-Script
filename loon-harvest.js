@@ -587,6 +587,21 @@ function handleJd(ctx) {
     const _mv = /jdapp;[^;]*;\s*([0-9][0-9.]*)/.exec(_ua) || /appVersion\/([0-9.]+)/.exec(_ua);
     if (_mv) dev[8] = _mv[1];
   }
+  /* 诊断：把 api.m.jd.com 上有哪些请求头记下来（只记名字，不含值）。
+     采不到 JD_DEVICE 时看 JD_HEADERS 就知道是「头不存在」还是「字段名猜错」。 */
+  try {
+    const names = Object.keys(reqHeaders || {}).map(function (k) { return String(k).toLowerCase(); }).sort();
+    if (names.length) {
+      jobs.push({
+        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断',
+        build: function (old) {
+          const v = names.join(',');
+          return v === String(old || '').trim() ? null : v;
+        },
+      });
+    }
+  } catch (e) {}
+
   const devOk = dev[1] && dev[2] && dev[3];   /* uuid + eid + wg 才是风控三件套 */
   if (devOk) {
     const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
