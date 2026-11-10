@@ -92,6 +92,21 @@ const CFG = {
     jdConvert: 180,     // 京东-Wskey换CK
   },
 
+  /* ★ 2026-11-10 v6：设备指纹的「配置兜底」。
+     抓包能拿到就用抓到的（新鲜），拿不到就用这里写的（一劳永逸，不用每次重抓）。
+     由 .lcf 的 argument 传进来：jduuid / jdeid / jdbrand / jdmodel / jdos / jdbuild / jdclient
+     UA 不传，脚本用上面几个字段自动拼成 jdapp; 格式。 */
+  jdDev: {
+    uuid:   String(ARG.jduuid   || ARG.JDUUID   || '').trim(),
+    eid:    String(ARG.jdeid    || ARG.JDEID    || '').trim(),
+    wg:     String(ARG.jdwg     || ARG.JDWG     || '').trim(),
+    brand:  String(ARG.jdbrand  || ARG.JDBRAND  || '').trim(),
+    model:  String(ARG.jdmodel  || ARG.JDMODEL  || '').trim(),
+    os:     String(ARG.jdos     || ARG.JDOS     || '').trim(),
+    build:  String(ARG.jdbuild  || ARG.JDBUILD  || '').trim(),
+    client: String(ARG.jdclient || ARG.JDCLIENT || '').trim(),
+  },
+
   pushCooldown: 30 * 60 * 1000,   // 同一身份 30 分钟内不重复写
   tokenTTL: 20 * 60 * 1000,       // 青龙 token 本地缓存
   timeout: 15000,                 // 单次 HTTP 超时，绝不静默挂住
@@ -614,16 +629,19 @@ function handleJd(ctx) {
     }
     return '';
   };
+  /* 抓包优先；抓不到就用配置里写死的兜底（CFG.jdDev） */
+  const _C = CFG.jdDev || {};
+  const _pick = function (live, fallback) { return live || fallback || ''; };
   const dev = [
     _d('user-agent'),
-    _d('uuid'),
-    _d('x-api-eid-token'),
-    _d('wg-sdk-token'),
-    _d('d_brand', 'd-brand', 'brand'),
-    _d('d_model', 'd-model', 'model'),
-    _d('osversion', 'os-version', 'osVersion'),
-    _d('build'),
-    _d('clientversion', 'client-version', 'clientVersion'),
+    _pick(_d('uuid'), _C.uuid),
+    _pick(_d('x-api-eid-token'), _C.eid),
+    _pick(_d('wg-sdk-token'), _C.wg),
+    _pick(_d('d_brand', 'd-brand', 'brand'), _C.brand),
+    _pick(_d('d_model', 'd-model', 'model'), _C.model),
+    _pick(_d('osversion', 'os-version', 'osVersion'), _C.os),
+    _pick(_d('build'), _C.build),
+    _pick(_d('clientversion', 'client-version', 'clientVersion'), _C.client),
   ];
   /* 2026-11-10 修：原来要求 client_version 必须有，但京东的 clientVersion
      多数请求**没有独立头**（README 也说「可以从 jdapp UA 取」）→ 门槛过不了 →
@@ -651,6 +669,22 @@ function handleJd(ctx) {
       if (out.length === 32) dev[1] = out;
     } catch (e) {}
   })();
+
+  /* UA 兜底：抓包里常是 JD4iPhone 老格式，配置里不传 UA，
+     这里用 client/build/os/brand/model/uuid 拼成脚本认的 jdapp; 格式。 */
+  if (!dev[0] || !/^jdapp;/i.test(dev[0])) {
+    if (dev[8] && dev[1]) {
+      const _osu = String(dev[6] || '18.0').replace(/\./g, '_');
+      dev[0] = ('jdapp;iPhone;%s;;;M/5.0;appBuild/%s;jdSupportDarkMode/0;'
+        + 'Mozilla/5.0 (iPhone; CPU iPhone OS %s like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Mobile/15E148;supportJDSHWK/1;uuid=%s;osVersion=%s;'
+        + 'd_brand=%s;d_model=%s')
+        .replace('%s', dev[8]).replace('%s', dev[7] || '171195')
+        .replace('%s', _osu).replace('%s', dev[1])
+        .replace('%s', dev[6] || '18.0').replace('%s', dev[4] || 'apple')
+        .replace('%s', dev[5] || 'iPhone');
+    }
+  }
 
   const _ua = dev[0] || '';
   const _mb = /appBuild\/(\d+)/.exec(_ua);
