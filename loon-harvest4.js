@@ -727,21 +727,27 @@ function handleTaobao(ctx) {
 
   /* ① x-umt 设备头 —— 幸运星领奖必须要它，这是唯一能拿到真值的地方 */
   const umt = getHeader(reqHeaders, 'x-umt') || getHeader(reqHeaders, 'x-umidtoken');
-  /* ★ 2026-11-11 诊断：把「淘宝请求有没有带 x-umt」写进面板 LOON_DBG。
-   * 用途：远程判断是「脚本没跑」还是「MITM 没覆盖这个域名」——前者 LOON_DBG 不变，
-   * 后者会留下一条「无 x-umt ｜ <url>」，url 直接告诉我们该加哪个域名。
-   * 60 秒一条，避免刷爆面板。 */
-  if (!umt) {
+  /* ★ 2026-11-11 诊断 v2：把每一次命中规则的淘宝/闪购请求都记下来（最近 4 条）。
+   * 格式 `时:分:秒 umt=32/no-umt <url>`。
+   * 三种结论：LOON_DBG 不动 = 规则没命中；全是 no-umt = 命中了但该请求天生不带这个头；
+   * 出现 umt=NN = 采到了。5 秒节流，避免一次点击几十个请求刷爆面板。 */
+  {
     const _now = Date.now();
     const _last = parseInt(prefGet('tb_dbg_at', '0') || '0', 10) || 0;
-    if (_now - _last > 60000) {
+    if (_now - _last > 5000) {
       prefSet('tb_dbg_at', String(_now));
+      let _seen = [];
+      try { _seen = JSON.parse(prefGet('tb_seen', '[]') || '[]'); } catch (e) { _seen = []; }
+      if (!Array.isArray(_seen)) _seen = [];
       const _u = String(ctx.url || '');
+      const _line = new Date().toISOString().slice(11, 19) + ' '
+        + (umt ? ('umt=' + umt.length) : 'no-umt') + ' ' + _u.slice(0, 84);
+      _seen.push(_line);
+      if (_seen.length > 4) _seen = _seen.slice(-4);
+      prefSet('tb_seen', JSON.stringify(_seen));
       jobs.push({
         env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断',
-        build: function () {
-          return '[' + new Date().toISOString().slice(11, 19) + '] 无 x-umt ｜ ' + _u.slice(0, 120);
-        },
+        build: function () { return _seen.join('\n'); },
       });
     }
   }
