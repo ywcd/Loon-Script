@@ -727,7 +727,12 @@ function handleTaobao(ctx) {
 
   /* ① x-umt 设备头 —— 幸运星领奖必须要它，这是唯一能拿到真值的地方 */
   const umt = getHeader(reqHeaders, 'x-umt') || getHeader(reqHeaders, 'x-umidtoken');
-  if (umt && umt.length >= 40) {
+  /* ★ 2026-11-11：门槛从 40 降到 16。
+   * 证据：GitHub Moli-X/Resources Script/Ali.js 里阿里系真机请求的 x-umt 是
+   * `58YB2PZLPC8C8RKHR1u9Yzg4XNwg8r0D` —— 32 字符。原来的 >=40 会把真值直接丢掉，
+   * 表现就是「其他变量都在更新、只有 MD_UMT 永远停在占位符」。
+   * 只要不是中文、长度够 16，就当 umt 收下（服务端还有一层占位符过滤）。 */
+  if (umt && umt.length >= 16 && !/[^\x20-\x7e]/.test(umt)) {
     jobs.push({
       env: 'MD_UMT', pin: '_', cron: 0, note: 'x-umt',
       build: function (old) { return umt === String(old || '').trim() ? null : umt; },
