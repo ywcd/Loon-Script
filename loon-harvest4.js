@@ -727,6 +727,24 @@ function handleTaobao(ctx) {
 
   /* ① x-umt 设备头 —— 幸运星领奖必须要它，这是唯一能拿到真值的地方 */
   const umt = getHeader(reqHeaders, 'x-umt') || getHeader(reqHeaders, 'x-umidtoken');
+  /* ★ 2026-11-11 诊断：把「淘宝请求有没有带 x-umt」写进面板 LOON_DBG。
+   * 用途：远程判断是「脚本没跑」还是「MITM 没覆盖这个域名」——前者 LOON_DBG 不变，
+   * 后者会留下一条「无 x-umt ｜ <url>」，url 直接告诉我们该加哪个域名。
+   * 60 秒一条，避免刷爆面板。 */
+  if (!umt) {
+    const _now = Date.now();
+    const _last = parseInt(prefGet('tb_dbg_at', '0') || '0', 10) || 0;
+    if (_now - _last > 60000) {
+      prefSet('tb_dbg_at', String(_now));
+      const _u = String(ctx.url || '');
+      jobs.push({
+        env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断',
+        build: function () {
+          return '[' + new Date().toISOString().slice(11, 19) + '] 无 x-umt ｜ ' + _u.slice(0, 120);
+        },
+      });
+    }
+  }
   /* ★ 2026-11-11：门槛从 40 降到 16。
    * 证据：GitHub Moli-X/Resources Script/Ali.js 里阿里系真机请求的 x-umt 是
    * `58YB2PZLPC8C8RKHR1u9Yzg4XNwg8r0D` —— 32 字符。原来的 >=40 会把真值直接丢掉，
