@@ -122,7 +122,7 @@ const NOW = Date.now();
  * 不一致只提醒，不阻断采集（旧配置多半还能用）。
  * 提醒 6 小时内只发一次，免得每次开 App 都弹。
  * ============================================================ */
-const CFG_VER = 4;
+const CFG_VER = 5;
 function checkCfgVersion() {
   const got = parseInt(ARG.cfgv || ARG.CFGV || '0', 10) || 0;
   if (got >= CFG_VER) return;
