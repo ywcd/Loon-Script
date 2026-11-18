@@ -78,6 +78,21 @@ function readArgument() {
 
 const ARG = readArgument();
 
+/* 家庭 Wi-Fi 白名单：只有这些 SSID 才执行采集；未配置时保持原行为。
+ * 配置方式：在 Loon 的 script(...) 参数里加 &home_ssid=家里WiFi名
+ * 多个 SSID 用英文逗号分隔；YOUR_HOME_SSID 是占位符，视为未配置。 */
+const HOME_SSIDS = String(ARG.home_ssid || ARG.homeSsid || '')
+  .split(',').map(function (s) { return s.trim(); })
+  .filter(function (s) { return s && s !== 'YOUR_HOME_SSID'; });
+
+function currentSsid() {
+  try {
+    if (typeof $config === 'undefined' || !$config || !$config.getConfig) return '';
+    var c = JSON.parse($config.getConfig() || '{}');
+    return String(c.ssid || '');
+  } catch (e) { return ''; }
+}
+
 const CFG = {
   version: 'harvest-1.4',
 
@@ -926,6 +941,13 @@ function pickPlatform(host) {
 }
 
 function main() {
+  const ssid = currentSsid();
+  if (HOME_SSIDS.length && HOME_SSIDS.indexOf(ssid) === -1) {
+    log('skip-ssid | 当前 SSID=' + (ssid || '(未知)') + '，不在家庭白名单');
+    finish();
+    return;
+  }
+
   const host = hostOf(reqUrl);
   const plat = pickPlatform(host);
   if (!plat) {
