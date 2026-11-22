@@ -1,7 +1,7 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.4 ｜ 2026-11-06 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.5 ｜ 2026-11-22 ｜ 凭据走 Loon argument，文件本身可公开
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -14,6 +14,8 @@
  *   闲鱼      XIANYU_COOKIE            cookie（unb 做标识）
  *   联通      chinaUnicomCookie        token + appId + 手机号
  *   值得买    SMZDM_COOKIE             cookie
+ *   京东定位  JD_LOCATION              area/lng/lat/tttparams（守护豆田）
+ *   快递小哥  KDXG_UNIONID             微信 unionId（lanlv-key）
  *
  * ── 采不到的（别指望这个脚本）────────────────────────────────
  *   电信 / 高德 / 移动话费 / 移动云盘 —— 这些是「手机号+服务密码」登录，
@@ -94,7 +96,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.4',
+  version: 'harvest-1.5',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
@@ -137,7 +139,7 @@ const NOW = Date.now();
  * 不一致只提醒，不阻断采集（旧配置多半还能用）。
  * 提醒 6 小时内只发一次，免得每次开 App 都弹。
  * ============================================================ */
-const CFG_VER = 5;
+const CFG_VER = 6;
 function checkCfgVersion() {
   const got = parseInt(ARG.cfgv || ARG.CFGV || '0', 10) || 0;
   if (got >= CFG_VER) return;
@@ -190,6 +192,13 @@ const PLATFORMS = [
     name: '值得买',
     hosts: ['h5.smzdm.com', 'user-api.smzdm.com', 'post.smzdm.com', 'm.smzdm.com'],
     handle: handleSmzdm,
+  },
+  {
+    /* 2026-11-22：快递小哥（微信小程序）—— 身份是微信 unionId，不在 cookie 里 */
+    id: 'kdxg',
+    name: '快递小哥',
+    hosts: ['jingxiaoge-api-out.jdl.com', 'qiwei-front.jdl.com'],
+    handle: handleKdxg,
   },
 ];
 
@@ -732,6 +741,55 @@ function handleJd(ctx) {
       },
     });
   }
+
+  /* ④ JD_LOCATION —— 守护豆田的实时定位（2026-11-22 加）
+   * 来源：api.m.jd.com 的 POST 表单或 Referer / URL 里的
+   *       gps_area / area / un_area、lng / lat，以及 tttparams。
+   * tttparams 是带前缀的 base64 JSON，这里只把原样字符串送回青龙，
+   * 由 account_common.location_from_referer() 解码（它已处理干扰码）。
+   * 格式：pin#area#lng#lat#tttparams（后 4 段可空，至少一段有值才写）。
+   */
+  (function () {
+    const _bodyVal = function (name) {
+      const m = new RegExp('(?:^|&)' + name + '=([^&]*)', 'i').exec(ctx.body || '');
+      if (!m) return '';
+      try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+    };
+    const _val = function (names) {
+      for (let i = 0; i < names.length; i++) {
+        const v = _d(names[i]) || _bodyVal(names[i]);
+        if (v) return v;
+      }
+      return '';
+    };
+    const _ttt = (function () {
+      const srcs = [ctx.body || '', getHeader(reqHeaders, 'referer') || '', ctx.url || ''];
+      for (let i = 0; i < srcs.length; i++) {
+        const m = /(?:^|[?&#])tttparams=([^&#\s"'\\]+)/i.exec(srcs[i]);
+        if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }
+      }
+      return '';
+    })();
+    const area = _val(['gps_area', 'area', 'un_area', 'lbsArea']);
+    const lng = _val(['lng', 'longitude']);
+    const lat = _val(['lat', 'latitude']);
+    if (!area && !lng && !lat && !_ttt) return;
+    const clean = function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); };
+    const row = [pin, clean(area), clean(lng), clean(lat), clean(_ttt)].join('#');
+    jobs.push({
+      env: 'JD_LOCATION', pin: pin, cron: 0, note: '守护豆田定位',
+      build: function (old) {
+        const cur = splitLines(old).find(function (r) { return r.pin === pin; });
+        if (cur && String(cur.cookie || '') === row) return null;
+        /* 新值只补空段，已有真值不被后来的空值冲掉 */
+        const prev = cur ? String(cur.cookie || '').split('#') : ['', '', '', '', ''];
+        const merged = [pin, clean(area) || (prev[1] || ''), clean(lng) || (prev[2] || ''),
+                        clean(lat) || (prev[3] || ''), clean(_ttt) || (prev[4] || '')].join('#');
+        if (cur && String(cur.cookie || '') === merged) return null;
+        return upsertRow(old, pin, merged);
+      },
+    });
+  })();
   return jobs;
 }
 
@@ -915,6 +973,45 @@ function handleSmzdm(ctx) {
       /* 新值优先 —— sess/user 就是凭证，必须覆盖，不能按「指纹键保留」处理 */
       const out = mergeCookiePreferNew(usable ? base : '', ck);
       return out === base ? null : out;
+    },
+  }];
+}
+
+/* ── 快递小哥 · 微信 unionId（2026-11-22 加） ─────────────────
+ * 微信小程序接口头 lanlv-key 就是 unionId（不是请求体里的 shareUnionId）。
+ * KDXG_UNIONID 格式：pt_pin=unionId，用 & 或换行分隔 —— 脚本按这个读。
+ */
+function handleKdxg(ctx) {
+  const union = getHeader(reqHeaders, 'lanlv-key')
+    || paramOf(ctx.url, ctx.body, 'unionId')
+    || getHeader(reqHeaders, 'unionid') || '';
+  if (!/^o[A-Za-z0-9_-]{10,40}$/.test(union)) {
+    dbg('kdxg | unionId 不合格式（拿到 ' + String(union).slice(0, 10) + '…）');
+    return [];
+  }
+  const pin = ctx.cookie['pt_pin'] || getHeader(reqHeaders, 'pt_pin')
+    || getHeader(reqHeaders, 'ptPin') || '';
+  if (!validPin(pin)) {
+    dbg('kdxg | 没抓到 pt_pin，unionId 无法归属账号');
+    return [];
+  }
+  return [{
+    env: 'KDXG_UNIONID', pin: pin, cron: 0, note: 'unionId',
+    build: function (old) {
+      const rows = String(old || '').split(/[&\r\n,]+/).map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.indexOf('=') > 0; });
+      const line = pin + '=' + union;
+      let hit = -1;
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].split('=')[0].trim() === pin) { hit = i; break; }
+      }
+      if (hit >= 0) {
+        if (rows[hit] === line) return null;
+        rows[hit] = line;
+      } else {
+        rows.push(line);
+      }
+      return rows.join('\n');
     },
   }];
 }
