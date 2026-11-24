@@ -37,6 +37,7 @@ var CFG = {
    浏览器补指纹/回写，不会把含分号的 App UA 拆碎（172 本身不用改）。 */
 var ENV_NAME = "JD_COOKIE";
 var UA_ENV_NAME = "JD_USER_AGENT";
+var LOC_ENV_NAME = "JD_LOCATION";   /* 守护豆田定位：pin#area#lng#lat */
 var NOTIFY_GAP_MS = 10 * 60 * 1000;
 var DEV_KEY = "jdck_dev_v3";
 var MAX_HOLD_MS = 28000; // 青龙 OpenAPI 多步请求需要更长等待时间
@@ -487,6 +488,32 @@ function upsertUserAgent(token, ua) {
   });
 }
 
+/* 守护豆田定位：写 JD_LOCATION，格式 pin#area#lng#lat（多账号换行，同号替换）。
+   只在 f.area/f.lng/f.lat 都有时才写；占位符"待Loon写入"会被替换掉。 */
+function upsertLocation(token, pin, area, lng, lat) {
+  if (!pin || !area || !lng || !lat) return Promise.resolve({ changed: false, skipped: true });
+  var line = pin + "#" + area + "#" + lng + "#" + lat;
+  return listEnvs(token, LOC_ENV_NAME).then(function (envs) {
+    var hit = envs.length ? envs[0] : null;
+    var old = String((hit && hit.value) || "");
+    // 保留其它账号行，只替换同 pin 的
+    var lines = old.split(/[\n&]/).filter(function (x) {
+      return x && x.indexOf(pin + "#") !== 0;
+    });
+    lines.push(line);
+    var value = lines.join("\n");
+    if (old === value) return { changed: false, skipped: false };
+    if (hit) {
+      return api("/open/envs", "PUT", token, JSON.stringify({
+        id: hit.id, name: LOC_ENV_NAME, value: value, remarks: "京东 App 自动采集定位"
+      })).then(function (r) { ok(r, "更新 JD_LOCATION"); return { changed: true, skipped: false }; });
+    }
+    return api("/open/envs", "POST", token, JSON.stringify([{
+      name: LOC_ENV_NAME, value: value, remarks: "京东 App 自动采集定位"
+    }])).then(function (r) { ok(r, "新增 JD_LOCATION"); return { changed: true, skipped: false }; });
+  });
+}
+
 function queryBean(ua, key, pin) {
   return new Promise(function (resolve) {
     $httpClient.get({
@@ -547,6 +574,9 @@ function push(f, cookie) {
       return enabled;
     });
   }).then(function (enabled) {
+    // 守护豆田定位：有经纬度时写 JD_LOCATION
+    return upsertLocation(token, pin, f.area, f.lng, f.lat).then(function () { return enabled; });
+  }).then(function (enabled) {
     if (!CFG.pushBean || action === "未变化") return { enabled: enabled, bean: "" };
     return queryBean(ua, f.pt_key, pin).then(function (bean) {
       return { enabled: enabled, bean: bean };
@@ -565,12 +595,9 @@ function push(f, cookie) {
     if (!f.wg) lines.push("缺 wg-sdk-token（守护豆田可能跳过，打开一次种豆得豆即可尝试补齐）");
     if (r.bean) lines.push("京豆：" + r.bean);
     // 每个账号单独通知冷却；CK 未变化且 UA 未变化时不通知。
-    var noticeKey = "jdck_notice_" + hash(pin);
-    var lastNotice = parseInt($persistentStore.read(noticeKey) || "0", 10) || 0;
-    var meaningful = action !== "未变化" || uaResult.changed;
-    if (CFG.notify && meaningful && Date.now() - lastNotice >= NOTIFY_GAP_MS) {
+    /* 改法 A：每次成功都通知（不再受 10 分钟冷却 / 未变化不通知限制）—— 老大 11-24 定 */
+    if (CFG.notify) {
       $notification.post("京东 CK 同步青龙", nick, lines.join("\n"));
-      $persistentStore.write(String(Date.now()), noticeKey);
     }
     log("青龙" + action + " " + nick + " / UA变化=" + !!uaResult.changed + " / " + (r.bean || ""));
     return r;
