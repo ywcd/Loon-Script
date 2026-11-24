@@ -601,11 +601,12 @@ function sigOf(f) {
 
 (function main() {
   var req = typeof $request !== "undefined" ? $request : {};
+  log("触发 host=" + hostOf(req.url) + " url=" + String(req.url || "").slice(0, 90));
   seedDevFromArg();
   var f = mergeDev(collect(req));
 
-  if (!f.pt_key || !f.pt_pin) return finish();
-  if (!PUSH_HOSTS[hostOf(req.url)]) return finish();
+  if (!f.pt_key || !f.pt_pin) { log("跳过：Cookie 无 pt_key/pt_pin（需 MITM 解密京东 App）"); return finish(); }
+  if (!PUSH_HOSTS[hostOf(req.url)]) { log("跳过：host 非 api.m/sh.jd.com"); return finish(); }
   if (Date.now() < (parseInt($persistentStore.read("jdck_down") || "0", 10) || 0)) return finish();
 
   var ua = uaOf(f), miss = missing(f, ua);
