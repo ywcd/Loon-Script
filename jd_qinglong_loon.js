@@ -252,6 +252,25 @@ function collect(req) {
 
 /* ---------------- 跨请求缓存 ---------------- */
 
+/* 兜底：把你原配置 argument 里的 jduuid/jdeid/… 灌进设备缓存。
+   京东 App 不是每个请求都带全 9 字段；有这些兜底值 missing() 才不会一直跳过。 */
+function seedDevFromArg() {
+  var map = {
+    jduuid: "uuid", openudid: "openudid", jdeid: "eid", jdwg: "wg",
+    jdbrand: "d_brand", jdmodel: "d_model", jdos: "osVersion",
+    jdbuild: "build", jdclient: "clientVersion"
+  };
+  var dev = loadDev(), changed = false;
+  for (var k in map) {
+    if (ARG[k] && !dev[map[k]]) { dev[map[k]] = String(ARG[k]); changed = true; }
+  }
+  if (ARG.jdos && ARG.jdclient && !dev.ua) {
+    dev.ua = "jdapp;iPhone;" + ARG.jdclient + ";;;M/5.0;appBuild/" + (ARG.jdbuild || "") + ";";
+    changed = true;
+  }
+  if (changed) saveDev(dev);
+}
+
 function loadDev() {
   try { return JSON.parse($persistentStore.read(DEV_KEY) || "{}") || {}; } catch (e) { return {}; }
 }
@@ -582,6 +601,7 @@ function sigOf(f) {
 
 (function main() {
   var req = typeof $request !== "undefined" ? $request : {};
+  seedDevFromArg();
   var f = mergeDev(collect(req));
 
   if (!f.pt_key || !f.pt_pin) return finish();
