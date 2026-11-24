@@ -24,6 +24,7 @@ var ARG = (function () {
 
 var CFG = {
   panel: ARG.panel || ARG.PANEL || "",   /* 必填 —— 青龙地址只从 argument 传，脚本本体不写内网地址，可公开上传 */
+  node: ARG.node || "",                   /* $httpClient 显式指定节点（Loon 脚本 HTTP 默认不走规则） */
   clientId: ARG.cid || ARG.clientId || "填写新的Client ID",
   clientSecret: ARG.secret || ARG.clientSecret || "填写新的Client Secret",
   minGapMin: 1,
@@ -348,7 +349,10 @@ function compose(f) {
 function httpCall(method, url, token, body) {
   return new Promise(function (resolve, reject) {
     var headers = { "Accept": "application/json" };
-    var opts = { url: url, headers: headers, timeout: 5000 };
+    var opts = { url: url, headers: headers, timeout: 15000 };
+    /* ★ Loon 脚本的 $httpClient 默认走 DIRECT，不会走 Rule 里的 Tailscale 分流；
+       panel 是 tailnet IP，必须显式指定 node 才能到达。 */
+    if (CFG.node) opts.node = CFG.node;
     if (body != null) {
       opts.body = body;
       headers["Content-Type"] = "application/json";
@@ -492,7 +496,7 @@ function queryBean(ua, key, pin) {
         Referer: "https://home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&",
         "User-Agent": ua || "jdapp;iPhone;15.0.0;;;M/5.0;appBuild/100000;"
       },
-      timeout: 4000
+      timeout: 8000
     }, function (err, resp, data) {
       if (err) return resolve("查询失败");
       var j = null;
