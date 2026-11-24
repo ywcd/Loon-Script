@@ -595,9 +595,13 @@ function push(f, cookie) {
     if (!f.wg) lines.push("缺 wg-sdk-token（守护豆田可能跳过，打开一次种豆得豆即可尝试补齐）");
     if (r.bean) lines.push("京豆：" + r.bean);
     // 每个账号单独通知冷却；CK 未变化且 UA 未变化时不通知。
-    /* 改法 A：每次成功都通知（不再受 10 分钟冷却 / 未变化不通知限制）—— 老大 11-24 定 */
-    if (CFG.notify) {
+    /* 现状（老大 11-24 定）：CK 真变了或 UA 变了才通知；10 分钟每账号冷却，不吵 */
+    var noticeKey = "jdck_notice_" + hash(pin);
+    var lastNotice = parseInt($persistentStore.read(noticeKey) || "0", 10) || 0;
+    var meaningful = action !== "未变化" || uaResult.changed;
+    if (CFG.notify && meaningful && Date.now() - lastNotice >= NOTIFY_GAP_MS) {
       $notification.post("京东 CK 同步青龙", nick, lines.join("\n"));
+      $persistentStore.write(String(Date.now()), noticeKey);
     }
     log("青龙" + action + " " + nick + " / UA变化=" + !!uaResult.changed + " / " + (r.bean || ""));
     return r;
