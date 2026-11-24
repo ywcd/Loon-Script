@@ -435,16 +435,22 @@ function findPin(envs, pin) {
   return null;
 }
 function saveEnv(token, hit, cookie, pin) {
+  /* 多账号铁律：同号替换、异号追加，绝不整条覆盖。
+     hit 可能是同 pin 的行，env 里还有别的号 —— 必须保留其它行。 */
+  var old = String((hit && hit.value) || "");
+  var lines = split(old).filter(function (x) { return cval(x, "pt_pin") !== pin; });
+  lines.push(cookie);
+  var value = lines.join("\n");
   if (hit) {
     return api("/open/envs", "PUT", token, JSON.stringify({
-      id: hit.id, name: ENV_NAME, value: cookie, remarks: pin
+      id: hit.id, name: ENV_NAME, value: value, remarks: pin
     })).then(function (r) {
       ok(r, "更新青龙环境变量");
       return { action: "已更新", id: hit.id, status: hit.status };
     });
   }
   return api("/open/envs", "POST", token, JSON.stringify([{
-    name: ENV_NAME, value: cookie, remarks: pin
+    name: ENV_NAME, value: value, remarks: pin
   }])).then(function (r) {
     ok(r, "新增青龙环境变量");
     var d = (r.json && r.json.data) || [];
