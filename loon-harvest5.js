@@ -663,23 +663,29 @@ function handleJd(ctx) {
       const keys = Object.keys(ckx).map(function (k) { return String(k).toLowerCase(); }).sort();
       const d = new Date(NOW + 8 * 3600 * 1000);
       const p2 = function (n) { return (n < 10 ? '0' : '') + n; };
-      const v = (p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds())
-        + ' host=' + h + ' n=' + keys.length
-        + ' wskey=' + (hasW ? 'Y' : 'N')
-        + ' keys=' + keys.join(',')).slice(0, 300);
+      const stamp = p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds());
+      /* 只留最近 6 条，最新在最上面 —— 一眼能看出京东到底在哪些子域上带哪些键 */
+      const line = (stamp + ' ' + h + ' n=' + keys.length + ' W=' + (hasW ? 'Y' : 'N')
+        + (hasW ? ' keys=' + keys.join(',') : '')).slice(0, 220);
       return [{
         env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针', quiet: true,
         build: function (old) {
-          const cur = String(old || '').trim();
-          if (cur === v) return null;
-          return v;
+          const rows = String(old || '').split('\n')
+            .map(function (x) { return x.trim(); })
+            .filter(function (x) { return /^[0-9]{2}:[0-9]{2}:[0-9]{2}\s/.test(x) && x !== line; });
+          rows.unshift(line);
+          const out = rows.slice(0, 6).join('\n');
+          if (out === String(old || '').trim()) return null;
+          return out;
         },
       }];
     } catch (e) { return []; }
   })();
 
   const ck = ctx.cookie;
-  const pin = ck['pt_pin'] || '';
+  /* 2026-11-25：京东新版 Cookie 里账号名可能只叫 `pin`（blackhole/perf 这类域名就是），
+     pt_pin 是老的。两个都认，否则抓到 wskey 也会因为「没有 pin」被判无效。 */
+  const pin = ck['pt_pin'] || ck['pin'] || '';
   const ptKey = ck['pt_key'] || ck['light_key'] || '';
   const wskey = ck['wskey'] || '';
   if (!validPin(pin)) {
