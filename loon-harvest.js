@@ -371,15 +371,26 @@ function http(opts) {
         return;
       }
       if (typeof $httpClient !== 'undefined' && $httpClient) {
-        /* PUT 必须有正确 fallback：Loon 无 $httpClient.put 时用 post（绝不能降成 get）。 */
+        /* PUT fallback：Loon 无 $httpClient.put 时用 post（绝不降成 get）。 */
         const fn = (method === 'PUT')
           ? (typeof $httpClient.put === 'function' ? $httpClient.put : $httpClient.post)
           : (typeof $httpClient[method.toLowerCase()] === 'function' ? $httpClient[method.toLowerCase()] : $httpClient.get);
-        fn({ url: opts.url, headers: opts.headers || {}, body: opts.body || undefined, node: NODE },
-          function (err, resp, body) {
+        const base = { url: opts.url, headers: opts.headers || {}, body: opts.body || undefined };
+        /* node 容错（2026-11-25）：配置里的节点名(如 Tailscale-Home)若在当前 Loon 不存在，
+           Loon 报 "Can not find policy:xxx" → 自动重试一次不带 node（用 Loon 全局/规则节点）。
+           这样节点改名/未授权也不会让抓包彻底失败。 */
+        const tryCall = function (useNode, attempt) {
+          const o = Object.assign({}, base);
+          if (useNode && NODE) o.node = NODE;
+          fn(o, function (err, resp, body) {
+            if (err && attempt === 0 && NODE && /policy|node|not find/i.test(String(err))) {
+              return tryCall(false, 1); // 降级：不带 node 重试
+            }
             if (err) return no(new Error('网络失败: ' + err));
             ok({ status: (resp && (resp.status || resp.statusCode)) || 0, body: body || '' });
           });
+        };
+        tryCall(true, 0);
         return;
       }
       no(new Error('Loon 无可用 HTTP 客户端'));
