@@ -636,22 +636,37 @@ function handleJd(ctx) {
     } catch (e) { return []; }
   })();
 
-  /* ★ 2026-11-25 wskey 探针：网上抓 wskey 的经验是在 **im-x.jd.com / msg.m.jd.com**
-     这类「消息/推送」域名上、凭 Cookie 里的 pin+wskey 拿到（api.m.jd.com 常常不带）。
-     京东 App 请求量很大，只在上面几个域名上记一条，免得把青龙刷爆：
-     值 = `时:分:秒 host=… keys=… wskey=Y/N`，只记键名不记值。 */
+  /* ★ 2026-11-25 wskey 探针（自动适配版）
+     京东把 wskey 藏在哪个子域一直在变（社区脚本用的是 blackhole.m.jd.com/getinfo）。
+     这里对**所有 *.jd.com** 请求记录一条 `时:分:秒 host=… n=… wskey=Y/N keys=…`（只记键名），
+     节流规则：重点域名（blackhole/perf/im-x/msg.m/wskey）或**带 wskey** 立即记；
+     其它域名同一 host 30 分钟最多一条，最多留 60 个 host —— 不刷爆青龙。 */
   const _ckProbe = (function () {
     try {
       const h = String(ctx.host || '');
-      if (!/(^|\.)(im-x|msg\.m|wskey|blackhole\.m|perf\.m)\.jd\.com$/i.test(h)) return [];
+      if (!/(^|\.)jd\.com$/i.test(h)) return [];
       const ckx = ctx.cookie || {};
+      const hasW = !!ckx['wskey'];
+      const keyHost = /(^|\.)(blackhole\.m|perf\.m|im-x|msg\.m|wskey)\.jd\.com$/i.test(h);
+      const mapKey = 'ckdbg_hosts';
+      let map = {};
+      try { map = JSON.parse(prefGet(mapKey, '{}') || '{}') || {}; } catch (e) { map = {}; }
+      const lastTs = Number(map[h] || 0);
+      if (!hasW && !keyHost && NOW - lastTs < 30 * 60000) return [];
+      map[h] = NOW;
+      const hs = Object.keys(map);
+      if (hs.length > 60) {
+        hs.sort(function (a, b) { return map[a] - map[b]; })
+          .slice(0, hs.length - 60).forEach(function (x) { delete map[x]; });
+      }
+      prefSet(mapKey, JSON.stringify(map));
       const keys = Object.keys(ckx).map(function (k) { return String(k).toLowerCase(); }).sort();
       const d = new Date(NOW + 8 * 3600 * 1000);
       const p2 = function (n) { return (n < 10 ? '0' : '') + n; };
-      const v = p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds())
+      const v = (p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds())
         + ' host=' + h + ' n=' + keys.length
-        + ' wskey=' + (ckx['wskey'] ? 'Y' : 'N')
-        + ' keys=' + keys.join(',');
+        + ' wskey=' + (hasW ? 'Y' : 'N')
+        + ' keys=' + keys.join(',')).slice(0, 300);
       return [{
         env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针', quiet: true,
         build: function (old) {
@@ -1115,6 +1130,9 @@ function pickPlatform(host) {
       if (host === p.hosts[j] || host.endsWith('.' + p.hosts[j])) return p;
     }
   }
+  /* ★ 2026-11-25 自动适配：京东域名太多（wskey 到底落在哪个子域一直在变），
+     只要是 *.jd.com 就交给京东 handler；探针只记录、不乱写。 */
+  if (/(^|\.)jd\.com$/i.test(host)) return PLATFORMS[0];
   return null;
 }
 
@@ -1180,7 +1198,9 @@ function main() {
      （冷却 30 分钟管「相同输入」，这道闸门管「并发」，两件事。） */
   const gateKey = 'gate_' + plat.id;
   const gateTs = Number(prefGet(gateKey, 0));
-  if (NOW - gateTs < 3000) {
+  /* 带 wskey 的请求 / blackhole、perf 这类关键域名，优先级最高，不被 3 秒闸门吃掉 */
+  const _prio = !!(ctx.cookie['wskey'] || /(^|\.)(blackhole\.m|perf\.m)\.jd\.com$/i.test(host));
+  if (!_prio && NOW - gateTs < 3000) {
     log(plat.id + ' | skip-gate | 3 秒内已有写入，跳过（防并发覆盖）');
     finish();
     return;
