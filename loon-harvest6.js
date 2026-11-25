@@ -371,7 +371,10 @@ function http(opts) {
         return;
       }
       if (typeof $httpClient !== 'undefined' && $httpClient) {
-        const fn = $httpClient[method.toLowerCase()] || $httpClient.get;
+        /* PUT 必须有正确 fallback：Loon 无 $httpClient.put 时用 post（绝不能降成 get）。 */
+        const fn = (method === 'PUT')
+          ? (typeof $httpClient.put === 'function' ? $httpClient.put : $httpClient.post)
+          : (typeof $httpClient[method.toLowerCase()] === 'function' ? $httpClient[method.toLowerCase()] : $httpClient.get);
         fn({ url: opts.url, headers: opts.headers || {}, body: opts.body || undefined, node: NODE },
           function (err, resp, body) {
             if (err) return no(new Error('网络失败: ' + err));
