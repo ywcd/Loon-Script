@@ -364,7 +364,7 @@ function http(opts) {
 
     const method = String(opts.method || 'GET').toUpperCase();
     try {
-      if (typeof $task !== 'undefined' && $task && $task.fetch) {
+      if (!NODE && typeof $task !== 'undefined' && $task && $task.fetch) {
         $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined, node: NODE })
           .then(function (r) { ok({ status: r.statusCode || r.status || 0, body: r.body || '' }); },
                 function (e) { no(new Error('网络失败: ' + (e && e.error ? e.error : e))); });
