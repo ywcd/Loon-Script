@@ -634,6 +634,33 @@ function handleJd(ctx) {
     } catch (e) { return []; }
   })();
 
+  /* ★ 2026-11-25 wskey 探针：网上抓 wskey 的经验是在 **im-x.jd.com / msg.m.jd.com**
+     这类「消息/推送」域名上、凭 Cookie 里的 pin+wskey 拿到（api.m.jd.com 常常不带）。
+     京东 App 请求量很大，只在上面几个域名上记一条，免得把青龙刷爆：
+     值 = `时:分:秒 host=… keys=… wskey=Y/N`，只记键名不记值。 */
+  const _ckProbe = (function () {
+    try {
+      const h = String(ctx.host || '');
+      if (!/(^|\.)(im-x|msg\.m|wskey)\.jd\.com$/i.test(h)) return [];
+      const ckx = ctx.cookie || {};
+      const keys = Object.keys(ckx).map(function (k) { return String(k).toLowerCase(); }).sort();
+      const d = new Date(NOW + 8 * 3600 * 1000);
+      const p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+      const v = p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds())
+        + ' host=' + h + ' n=' + keys.length
+        + ' wskey=' + (ckx['wskey'] ? 'Y' : 'N')
+        + ' keys=' + keys.join(',');
+      return [{
+        env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针',
+        build: function (old) {
+          const cur = String(old || '').trim();
+          if (cur === v) return null;
+          return v;
+        },
+      }];
+    } catch (e) { return []; }
+  })();
+
   const ck = ctx.cookie;
   const pin = ck['pt_pin'] || '';
   const ptKey = ck['pt_key'] || ck['light_key'] || '';
@@ -641,11 +668,11 @@ function handleJd(ctx) {
   if (!validPin(pin)) {
     /* 说清楚是「挡掉了」而不是「没抓到」，不然排查时一头雾水 */
     if (pin) log('jd | pin 被黑名单/格式挡掉：' + pin + '（京东测试账号会污染真实 pin）');
-    return _probe;
+    return _probe.concat(_ckProbe);
   }
-  if (!ptKey && !wskey) return _probe;
+  if (!ptKey && !wskey) return _probe.concat(_ckProbe);
 
-  const jobs = [];
+  const jobs = [].concat(_ckProbe);
   if (ptKey) {
     jobs.push({
       env: 'JD_COOKIE', pin: pin, cron: CFG.cron.jdSync,
