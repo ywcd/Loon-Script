@@ -624,7 +624,7 @@ function handleJd(ctx) {
       const v = names.join(',');
       const url = String(ctx.url || '').slice(0, 60);
       return [{
-        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断',
+        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断', quiet: true,
         build: function (old) {
           const cur = String(old || '').trim();
           if (cur === v) return null;
@@ -651,7 +651,7 @@ function handleJd(ctx) {
         + ' wskey=' + (ckx['wskey'] ? 'Y' : 'N')
         + ' keys=' + keys.join(',');
       return [{
-        env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针',
+        env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针', quiet: true,
         build: function (old) {
           const cur = String(old || '').trim();
           if (cur === v) return null;
@@ -898,7 +898,7 @@ function handleTaobao(ctx) {
       if (_seen.length > 4) _seen = _seen.slice(-4);
       prefSet('tb_seen', JSON.stringify(_seen));
       jobs.push({
-        env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断',
+        env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断', quiet: true,
         build: function () { return _seen.join('\n'); },
       });
     }
@@ -1188,6 +1188,7 @@ function main() {
   let tok = '';
   const applied = [];   // [{env, value, cron}]
   const skipped = [];
+  const real = [];      // 只算真内容（排除 JD_HEADERS / JD_CKDBG / LOON_DBG 这类诊断探针）
 
   getToken()
     .then(function (t) { tok = t; return getEnvs(tok); })
@@ -1211,15 +1212,18 @@ function main() {
                否则同一轮里若有两个 job 写同一个 env，第二个还会拿旧值当 base，
                把第一个刚写的冲掉。 */
             rec.value = nv;
-            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note });
+            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note, quiet: !!job.quiet });
           });
         });
       });
       return chain.reduce(function (p, fn) { return p.then(fn); }, Promise.resolve());
     })
     .then(function () {
-      if (!applied.length) {
-        log(plat.id + ' | skip-same | 没变化：' + skipped.join(' / '));
+      /* 2026-11-25：诊断探针（JD_HEADERS / JD_CKDBG / LOON_DBG）不算「抓包内容」，
+         只有真正的凭证变量变了才提示 + 触发下游任务。 */
+      applied.forEach(function (a) { if (!a.quiet) real.push(a); });
+      if (!real.length) {
+        log(plat.id + ' | skip-same | 没变化：' + (skipped.concat(applied.map(function (a) { return a.env + '(诊断)'; }))).join(' / '));
         return Promise.reject({ __skip: true });
       }
       /* 回读校验 */
@@ -1237,11 +1241,11 @@ function main() {
     })
     .then(function () {
       /* 只触发第一个非 0 的任务，避免重复跑 */
-      const cronId = (applied.map(function (a) { return a.cron; }).filter(function (x) { return x > 0; })[0]) || 0;
+      const cronId = (real.map(function (a) { return a.cron; }).filter(function (x) { return x > 0; })[0]) || 0;
       return runCron(tok, cronId).then(function (ok) { return { id: cronId, ok: ok }; });
     })
     .then(function (cronRes) {
-      const parts = applied.map(function (a) { return a.env + '(' + a.note + ')'; });
+      const parts = real.map(function (a) { return a.env + '(' + a.note + ')'; });
       const cronText = cronRes.id
         ? ('任务 ' + cronRes.id + (cronRes.ok ? ' 已触发' : ' 触发失败'))
         : '无需触发任务';
@@ -1257,7 +1261,17 @@ function main() {
       }
       const msg = (e && e.message) ? e.message : String(e);
       log(plat.id + ' | fail | ' + msg.slice(0, 90));
-      notify('采集失败 · ' + plat.name + ' ⚠️', msg.slice(0, 60), 'host=' + host);
+      /* 同一条错误 30 分钟内只弹一次（之前一次点击会弹两三条一模一样的「采集失败」） */
+      const fh = shortHash(msg);
+      const lastFh = prefGet('fail_' + plat.id, '');
+      const lastFt = Number(prefGet('fail_' + plat.id + '_ts', 0));
+      if (fh === lastFh && NOW - lastFt < 30 * 60000) {
+        log(plat.id + ' | fail-silent | 同样错误 30 分钟内已提示过');
+      } else {
+        prefSet('fail_' + plat.id, fh);
+        prefSet('fail_' + plat.id + '_ts', String(NOW));
+        notify('采集失败 · ' + plat.name + ' ⚠️', msg.slice(0, 60), 'host=' + host);
+      }
       finish();
     });
 }
