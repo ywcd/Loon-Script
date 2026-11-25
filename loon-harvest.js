@@ -172,7 +172,8 @@ const PLATFORMS = [
   {
     id: 'jd',
     name: '京东',
-    hosts: ['sh.jd.com', 'item.m.jd.com', 'api.m.jd.com', 'plogin.m.jd.com'],
+    hosts: ['sh.jd.com', 'item.m.jd.com', 'api.m.jd.com', 'plogin.m.jd.com',
+            'wq.jd.com', 'home.m.jd.com', 'im-x.jd.com', 'msg.m.jd.com'],
     handle: handleJd,
   },
   {
