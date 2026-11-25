@@ -79,6 +79,9 @@ function readArgument() {
 }
 
 const ARG = readArgument();
+/* Loon TF：脚本 HTTP 默认走 DIRECT，到不了 tailnet IP。
+   配置参数传 node=Tailscale-Home 时，青龙 API 请求显式走该节点（与旧 jd_qinglong_loon.js 一致）。 */
+const NODE = String(ARG.node || ARG.NODE || '').trim();
 
 /* 家庭 Wi-Fi 白名单：只有这些 SSID 才执行采集；未配置时保持原行为。
  * 配置方式：在 Loon 的 script(...) 参数里加 &home_ssid=家里WiFi名
@@ -362,14 +365,14 @@ function http(opts) {
     const method = String(opts.method || 'GET').toUpperCase();
     try {
       if (typeof $task !== 'undefined' && $task && $task.fetch) {
-        $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined })
+        $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined, node: NODE })
           .then(function (r) { ok({ status: r.statusCode || r.status || 0, body: r.body || '' }); },
                 function (e) { no(new Error('网络失败: ' + (e && e.error ? e.error : e))); });
         return;
       }
       if (typeof $httpClient !== 'undefined' && $httpClient) {
         const fn = $httpClient[method.toLowerCase()] || $httpClient.get;
-        fn({ url: opts.url, headers: opts.headers || {}, body: opts.body || undefined },
+        fn({ url: opts.url, headers: opts.headers || {}, body: opts.body || undefined, node: NODE },
           function (err, resp, body) {
             if (err) return no(new Error('网络失败: ' + err));
             ok({ status: (resp && (resp.status || resp.statusCode)) || 0, body: body || '' });
