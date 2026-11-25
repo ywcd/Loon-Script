@@ -173,7 +173,8 @@ const PLATFORMS = [
     id: 'jd',
     name: '京东',
     hosts: ['sh.jd.com', 'item.m.jd.com', 'api.m.jd.com', 'plogin.m.jd.com',
-            'wq.jd.com', 'home.m.jd.com', 'im-x.jd.com', 'msg.m.jd.com'],
+            'wq.jd.com', 'home.m.jd.com', 'im-x.jd.com', 'msg.m.jd.com',
+            'blackhole.m.jd.com', 'perf.m.jd.com'],
     handle: handleJd,
   },
   {
@@ -642,7 +643,7 @@ function handleJd(ctx) {
   const _ckProbe = (function () {
     try {
       const h = String(ctx.host || '');
-      if (!/(^|\.)(im-x|msg\.m|wskey)\.jd\.com$/i.test(h)) return [];
+      if (!/(^|\.)(im-x|msg\.m|wskey|blackhole\.m|perf\.m)\.jd\.com$/i.test(h)) return [];
       const ckx = ctx.cookie || {};
       const keys = Object.keys(ckx).map(function (k) { return String(k).toLowerCase(); }).sort();
       const d = new Date(NOW + 8 * 3600 * 1000);
@@ -1203,7 +1204,8 @@ function main() {
             skipped.push(job.env + '(不存在)');
             return null;
           }
-          const nv = job.build(String(rec.value || ''));
+          const rec_old = String(rec.value || '');
+          const nv = job.build(rec_old);
           if (nv === null || nv === undefined || nv === String(rec.value || '')) {
             skipped.push(job.env);
             return null;
@@ -1213,7 +1215,8 @@ function main() {
                否则同一轮里若有两个 job 写同一个 env，第二个还会拿旧值当 base，
                把第一个刚写的冲掉。 */
             rec.value = nv;
-            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note, quiet: !!job.quiet });
+            const isNewRow = job.pin && job.pin !== '_' && String(rec_old || '').indexOf(job.pin) === -1;
+            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note, quiet: !!job.quiet, isNew: isNewRow });
           });
         });
       });
@@ -1251,8 +1254,19 @@ function main() {
         ? ('任务 ' + cronRes.id + (cronRes.ok ? ' 已触发' : ' 触发失败'))
         : '无需触发任务';
       log(plat.id + ' | done | ' + parts.join(' ｜ ') + ' | ' + cronText);
-      notify('已采集 · ' + plat.name + ' ✅', parts.join('、') + '，' + cronText,
-        'host=' + host + '\n' + (skipped.length ? '未变：' + skipped.join(' / ') : ''));
+      /* 2026-11-25：京东 App 的 pt_key 每次开屏都会换一把，照「值变了就提示」会变成天天刷屏。
+         现在只有「新账号」或「采到 JD_WSKEY」才立刻提示；其余 6 小时最多一条。 */
+      const isNewAcct = real.some(function (a) { return a.isNew; });
+      const isKeyCap = real.some(function (a) { return a.env === 'JD_WSKEY'; });
+      const lastNt = Number(prefGet('nt_' + plat.id, 0));
+      const throttled = !isNewAcct && !isKeyCap && (NOW - lastNt < 6 * 3600 * 1000);
+      if (throttled) {
+        log(plat.id + ' | done-silent | 已在 ' + Math.round((NOW - lastNt) / 60000) + ' 分钟前提示过，这次不弹');
+      } else {
+        prefSet('nt_' + plat.id, String(NOW));
+        notify('已采集 · ' + plat.name + ' ✅', parts.join('、') + '，' + cronText,
+          'host=' + host + '\n' + (skipped.length ? '未变：' + skipped.join(' / ') : ''));
+      }
       finish();
     }, function (e) {
       if (e && e.__skip) {
