@@ -217,7 +217,8 @@ const PLATFORMS = [
  * 因为那里的 _tb_token_ / cookie2 / _m_h5_tk / sess 全都会轮换。
  */
 const CRED_KEYS = ['pt_key', 'pt_pin', 'light_key', 'wskey', 'pwdt_id', 'sfstoken',
-                   'key', 'pin', 'pinId', 'thor', 'token', 'thorToken'];
+                   'key', 'pin', 'pinId', 'thor', 'token', 'thorToken',
+                   'User-Agent', 'user-agent'];
 
 /* ============================================================
  * 基础工具
@@ -250,17 +251,39 @@ function getHeader(h, name) {
   return '';
 }
 
-/* "k=v; k2=v2" → {k:v, k2:v2} */
+/* UA 值内部自带分号（jdapp;iPhone;16.1.90;;;M/5.0;appBuild/171240），
+   按 ';' 硬切会被截成 "jdapp" —— 11-25 实测：合并老行时把 UA 切碎，
+   JDOOK 认不出系统版本 → 账号被跳过。下面这些键出现在 UA 之后 ⇒ 才是 UA 的终点。 */
+const UA_TAIL_STOP = ['pt_key', 'pt_pin', 'light_key', 'wskey', 'pwdt_id', 'sfstoken',
+  'uuid', 'x-api-eid-token', 'wg-sdk-token', 'build', 'clientversion',
+  '3ab9d23f7a4b3c9b', 'unpl', 'mba_muid', 'shshshfpa', 'shshshfpb', 'unionwsws',
+  '__jda', '__jdv', 'qid_fs', 'qid_evord', 'qid_sc', 'qid_uid', 'shshshfpx',
+  'iploc-djd', 'area'];
+
+/* "k=v; k2=v2" → {k:v, k2:v2}；User-Agent 单独按「整段」读，不被分号切开 */
 function parseCookie(s) {
   const out = {};
-  String(s || '').split(';').forEach(function (kv) {
-    const i = kv.indexOf('=');
-    if (i > 0) {
-      const k = kv.slice(0, i).trim();
-      const v = kv.slice(i + 1).trim();
-      if (k) out[k] = v;
+  const toks = String(s || '').split(';');
+  for (let i = 0; i < toks.length; i++) {
+    const kv = toks[i];
+    const eq = kv.indexOf('=');
+    if (eq <= 0) continue;
+    const k = kv.slice(0, eq).trim();
+    let v = kv.slice(eq + 1).trim();
+    if (k.toLowerCase() === 'user-agent' && /^jdapp(;|$)/i.test(v)) {
+      let j = i + 1;
+      while (j < toks.length) {
+        const t2 = toks[j];
+        const e2 = t2.indexOf('=');
+        const k2 = e2 > 0 ? t2.slice(0, e2).trim().toLowerCase() : '';
+        if (k2 && UA_TAIL_STOP.indexOf(k2) >= 0) break;   /* 到达下一个真键 */
+        v += ';' + t2;
+        j++;
+      }
+      i = j - 1;
     }
-  });
+    if (k) out[k] = v;
+  }
   return out;
 }
 
@@ -293,8 +316,16 @@ function parseSetCookie(raw) {
   return out;
 }
 
+/* UA 永远写到最后 —— 下次 parseCookie 就能「读到行尾」，不会再被后面的键切开 */
 function serializeCookie(obj) {
-  return Object.keys(obj).map(function (k) { return k + '=' + obj[k]; }).join(';');
+  const ua = [];
+  const rest = [];
+  Object.keys(obj).forEach(function (k) {
+    if (k.toLowerCase() === 'user-agent' && /^jdapp(;|$)/i.test(String(obj[k]))) ua.push(k);
+    else rest.push(k);
+  });
+  return rest.map(function (k) { return k + '=' + obj[k]; })
+    .concat(ua.map(function (k) { return k + '=' + obj[k]; })).join(';');
 }
 
 /* 采集上下文：请求 cookie + 响应 set-cookie 合并（响应优先，那是刚下发的） */
