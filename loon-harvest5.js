@@ -106,7 +106,8 @@ const CFG = {
   version: 'harvest-1.5',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
-  panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
+  panel: ARG.panel || ARG.PANEL || '',
+  panel2: ARG.panel2 || ARG.PANEL2 || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
   clientId: ARG.cid || ARG.clientId || ARG.CID || '',
   clientSecret: ARG.secret || ARG.clientSecret || ARG.SECRET || '',
 
@@ -415,7 +416,7 @@ function http(opts) {
         const base = { url: opts.url, headers: opts.headers || {}, body: opts.body || undefined };
         /* 节点候选链（2026-11-25）：逐个试 NODE_LIST，任一成功即锁定该节点。
            policy 错误在某些 Loon 版本只弹窗不进 err 回调 ⇒ 只能靠"实际请求是否成功"判定。 */
-        const candidates = (NODE_LOCK !== null) ? [NODE_LOCK] : NODE_LIST.slice();
+        const candidates = opts.noNode ? [''] : ((NODE_LOCK !== null) ? [NODE_LOCK] : NODE_LIST.slice());
         const tryIdx = function (i) {
           if (i >= candidates.length) return no(new Error('网络失败: 所有节点候选都失败 (' + candidates.join('|') + ')'));
           const o = Object.assign({}, base);
@@ -448,6 +449,21 @@ function parseJson(body, what) {
  * 青龙 API
  * ============================================================ */
 
+/* 面板域名兜底：主面板（tailnet，需 node）失败 → 试 panel2（家里内网，走 DIRECT 不带 node） */
+function qlTry(opts) {
+  return http(opts).catch(function (e) {
+    if (!CFG.panel2 || String(opts.url).indexOf(CFG.panel2) === 0) throw e;
+    const o2 = Object.assign({}, opts);
+    o2.url = String(opts.url).replace(CFG.panel, CFG.panel2);
+    o2.noNode = true;
+    return http(o2).then(function (r) {
+      log('panel-fallback | 主面板不通，本次改用 panel2');
+      CFG.panel = CFG.panel2;   /* 命中后本轮固定用备用，少绕一圈 */
+      return r;
+    });
+  });
+}
+
 function getToken() {
   const cached = prefGet('ql_tok', '');
   const exp = Number(prefGet('ql_tok_exp', 0));
@@ -459,7 +475,7 @@ function getToken() {
   const u = CFG.panel + '/open/auth/token?client_id=' +
     encodeURIComponent(CFG.clientId) + '&client_secret=' + encodeURIComponent(CFG.clientSecret);
 
-  return http({ url: u, method: 'GET' }).then(function (r) {
+  return qlTry({ url: u, method: 'GET' }).then(function (r) {
     const j = parseJson(r.body, '取票');
     if (!j.data || !j.data.token) {
       const hint = (!CFG.clientId || !CFG.clientSecret)
@@ -474,7 +490,7 @@ function getToken() {
 }
 
 function getEnvs(tok) {
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/envs', method: 'GET',
     headers: { Authorization: 'Bearer ' + tok },
   }).then(function (r) {
@@ -495,7 +511,7 @@ function findEnv(envs, name) {
 
 function putEnv(tok, rec, value) {
   /* 青龙 2.24 的 PUT /open/envs 只收 id/name/value/remarks，多传 timestamp/log_path 会 400 */
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/envs', method: 'PUT',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -511,7 +527,7 @@ function putEnv(tok, rec, value) {
 
 function runCron(tok, id) {
   if (!id) return Promise.resolve(false);
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/crons/run', method: 'PUT',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify([id]),
@@ -1304,13 +1320,16 @@ function main() {
       log(plat.id + ' | fail | ' + msg.slice(0, 90));
       /* 同一条错误 30 分钟内只弹一次（之前一次点击会弹两三条一模一样的「采集失败」） */
       const fh = shortHash(msg);
-      const lastFh = prefGet('fail_' + plat.id, '');
-      const lastFt = Number(prefGet('fail_' + plat.id + '_ts', 0));
-      if (fh === lastFh && NOW - lastFt < 30 * 60000) {
+      let seen = {};
+      try { seen = JSON.parse(prefGet('failmap_' + plat.id, '{}') || '{}') || {}; } catch (e2) { seen = {}; }
+      Object.keys(seen).forEach(function (k) { if (NOW - Number(seen[k] || 0) > 30 * 60000) delete seen[k]; });
+      if (seen[fh]) {
         log(plat.id + ' | fail-silent | 同样错误 30 分钟内已提示过');
       } else {
-        prefSet('fail_' + plat.id, fh);
-        prefSet('fail_' + plat.id + '_ts', String(NOW));
+        const ks = Object.keys(seen);
+        if (ks.length > 20) delete seen[ks[0]];
+        seen[fh] = NOW;
+        prefSet('failmap_' + plat.id, JSON.stringify(seen));
         notify('采集失败 · ' + plat.name + ' ⚠️', msg.slice(0, 60), 'host=' + host);
       }
       finish();
