@@ -81,7 +81,11 @@ function readArgument() {
 const ARG = readArgument();
 /* Loon TF：脚本 HTTP 默认走 DIRECT，到不了 tailnet IP。
    配置参数传 node=Tailscale-Home 时，青龙 API 请求显式走该节点（与旧 jd_qinglong_loon.js 一致）。 */
-const NODE = String(ARG.node || ARG.NODE || '').trim();
+/* Loon TF 节点候选：配置用分号分隔多个名字，逐个试到可用为止；空串=不带 node(全局/规则)。
+   例：node=Tailscale-Home;Tailscale;global;   最后留空表示兜底不带 node。 */
+const NODE_LIST = String(ARG.node || ARG.NODE || '').split(';').map(function(x){return String(x||'').trim();});
+if (!NODE_LIST.length) NODE_LIST.push('');
+let NODE_LOCK = null;  // 命中后锁定，后续请求直接用
 
 /* 家庭 Wi-Fi 白名单：只有这些 SSID 才执行采集；未配置时保持原行为。
  * 配置方式：在 Loon 的 script(...) 参数里加 &home_ssid=家里WiFi名
@@ -364,8 +368,8 @@ function http(opts) {
 
     const method = String(opts.method || 'GET').toUpperCase();
     try {
-      if (!NODE && typeof $task !== 'undefined' && $task && $task.fetch) {
-        $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined, node: NODE })
+      if (!NODE_LIST.join('') && typeof $task !== 'undefined' && $task && $task.fetch) {
+        $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined })
           .then(function (r) { ok({ status: r.statusCode || r.status || 0, body: r.body || '' }); },
                 function (e) { no(new Error('网络失败: ' + (e && e.error ? e.error : e))); });
         return;
@@ -376,21 +380,21 @@ function http(opts) {
           ? (typeof $httpClient.put === 'function' ? $httpClient.put : $httpClient.post)
           : (typeof $httpClient[method.toLowerCase()] === 'function' ? $httpClient[method.toLowerCase()] : $httpClient.get);
         const base = { url: opts.url, headers: opts.headers || {}, body: opts.body || undefined };
-        /* node 容错（2026-11-25）：配置里的节点名(如 Tailscale-Home)若在当前 Loon 不存在，
-           Loon 报 "Can not find policy:xxx" → 自动重试一次不带 node（用 Loon 全局/规则节点）。
-           这样节点改名/未授权也不会让抓包彻底失败。 */
-        const tryCall = function (useNode, attempt) {
+        /* 节点候选链（2026-11-25）：逐个试 NODE_LIST，任一成功即锁定该节点。
+           policy 错误在某些 Loon 版本只弹窗不进 err 回调 ⇒ 只能靠"实际请求是否成功"判定。 */
+        const candidates = (NODE_LOCK !== null) ? [NODE_LOCK] : NODE_LIST.slice();
+        const tryIdx = function (i) {
+          if (i >= candidates.length) return no(new Error('网络失败: 所有节点候选都失败 (' + candidates.join('|') + ')'));
           const o = Object.assign({}, base);
-          if (useNode && NODE) o.node = NODE;
+          const nd = candidates[i];
+          if (nd) o.node = nd;
           fn(o, function (err, resp, body) {
-            if (err && attempt === 0 && NODE && /policy|node|not find/i.test(String(err))) {
-              return tryCall(false, 1); // 降级：不带 node 重试
-            }
-            if (err) return no(new Error('网络失败: ' + err));
+            if (err) return tryIdx(i + 1);  // 试下一个候选
+            NODE_LOCK = nd;                 // 锁定可用节点
             ok({ status: (resp && (resp.status || resp.statusCode)) || 0, body: body || '' });
           });
         };
-        tryCall(true, 0);
+        tryIdx(0);
         return;
       }
       no(new Error('Loon 无可用 HTTP 客户端'));
