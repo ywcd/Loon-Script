@@ -1,7 +1,8 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.5 ｜ 2026-11-22 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.6 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ *      1.6：回读校验只校验真凭证，JD_CKDBG/JD_HEADERS/LOON_DBG 诊断探针不再误判整轮失败
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -79,6 +80,13 @@ function readArgument() {
 }
 
 const ARG = readArgument();
+/* Loon TF：脚本 HTTP 默认走 DIRECT，到不了 tailnet IP。
+   配置参数传 node=Tailscale-Home 时，青龙 API 请求显式走该节点（与旧 jd_qinglong_loon.js 一致）。 */
+/* Loon TF 节点候选：配置用分号分隔多个名字，逐个试到可用为止；空串=不带 node(全局/规则)。
+   例：node=Tailscale-Home;Tailscale;global;   最后留空表示兜底不带 node。 */
+const NODE_LIST = String(ARG.node || ARG.NODE || '').split(';').map(function(x){return String(x||'').trim();});
+if (!NODE_LIST.length) NODE_LIST.push('');
+let NODE_LOCK = null;  // 命中后锁定，后续请求直接用
 
 /* 家庭 Wi-Fi 白名单：只有这些 SSID 才执行采集；未配置时保持原行为。
  * 配置方式：在 Loon 的 script(...) 参数里加 &home_ssid=家里WiFi名
@@ -96,10 +104,11 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.5',
+  version: 'harvest-1.6',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
-  panel: ARG.panel || ARG.PANEL || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
+  panel: ARG.panel || ARG.PANEL || '',
+  panel2: ARG.panel2 || ARG.PANEL2 || '',   /* 必填 —— 不把服务器地址写死在公开代码里 */
   clientId: ARG.cid || ARG.clientId || ARG.CID || '',
   clientSecret: ARG.secret || ARG.clientSecret || ARG.SECRET || '',
 
@@ -165,7 +174,9 @@ const PLATFORMS = [
   {
     id: 'jd',
     name: '京东',
-    hosts: ['sh.jd.com', 'item.m.jd.com', 'api.m.jd.com', 'plogin.m.jd.com'],
+    hosts: ['sh.jd.com', 'item.m.jd.com', 'api.m.jd.com', 'plogin.m.jd.com',
+            'wq.jd.com', 'home.m.jd.com', 'im-x.jd.com', 'msg.m.jd.com',
+            'blackhole.m.jd.com', 'perf.m.jd.com'],
     handle: handleJd,
   },
   {
@@ -210,7 +221,8 @@ const PLATFORMS = [
  * 因为那里的 _tb_token_ / cookie2 / _m_h5_tk / sess 全都会轮换。
  */
 const CRED_KEYS = ['pt_key', 'pt_pin', 'light_key', 'wskey', 'pwdt_id', 'sfstoken',
-                   'key', 'pin', 'pinId', 'thor', 'token', 'thorToken'];
+                   'key', 'pin', 'pinId', 'thor', 'token', 'thorToken',
+                   'User-Agent', 'user-agent'];
 
 /* ============================================================
  * 基础工具
@@ -243,17 +255,39 @@ function getHeader(h, name) {
   return '';
 }
 
-/* "k=v; k2=v2" → {k:v, k2:v2} */
+/* UA 值内部自带分号（jdapp;iPhone;16.1.90;;;M/5.0;appBuild/171240），
+   按 ';' 硬切会被截成 "jdapp" —— 11-25 实测：合并老行时把 UA 切碎，
+   JDOOK 认不出系统版本 → 账号被跳过。下面这些键出现在 UA 之后 ⇒ 才是 UA 的终点。 */
+const UA_TAIL_STOP = ['pt_key', 'pt_pin', 'light_key', 'wskey', 'pwdt_id', 'sfstoken',
+  'uuid', 'x-api-eid-token', 'wg-sdk-token', 'build', 'clientversion',
+  '3ab9d23f7a4b3c9b', 'unpl', 'mba_muid', 'shshshfpa', 'shshshfpb', 'unionwsws',
+  '__jda', '__jdv', 'qid_fs', 'qid_evord', 'qid_sc', 'qid_uid', 'shshshfpx',
+  'iploc-djd', 'area'];
+
+/* "k=v; k2=v2" → {k:v, k2:v2}；User-Agent 单独按「整段」读，不被分号切开 */
 function parseCookie(s) {
   const out = {};
-  String(s || '').split(';').forEach(function (kv) {
-    const i = kv.indexOf('=');
-    if (i > 0) {
-      const k = kv.slice(0, i).trim();
-      const v = kv.slice(i + 1).trim();
-      if (k) out[k] = v;
+  const toks = String(s || '').split(';');
+  for (let i = 0; i < toks.length; i++) {
+    const kv = toks[i];
+    const eq = kv.indexOf('=');
+    if (eq <= 0) continue;
+    const k = kv.slice(0, eq).trim();
+    let v = kv.slice(eq + 1).trim();
+    if (k.toLowerCase() === 'user-agent' && /^jdapp(;|$)/i.test(v)) {
+      let j = i + 1;
+      while (j < toks.length) {
+        const t2 = toks[j];
+        const e2 = t2.indexOf('=');
+        const k2 = e2 > 0 ? t2.slice(0, e2).trim().toLowerCase() : '';
+        if (k2 && UA_TAIL_STOP.indexOf(k2) >= 0) break;   /* 到达下一个真键 */
+        v += ';' + t2;
+        j++;
+      }
+      i = j - 1;
     }
-  });
+    if (k) out[k] = v;
+  }
   return out;
 }
 
@@ -286,8 +320,16 @@ function parseSetCookie(raw) {
   return out;
 }
 
+/* UA 永远写到最后 —— 下次 parseCookie 就能「读到行尾」，不会再被后面的键切开 */
 function serializeCookie(obj) {
-  return Object.keys(obj).map(function (k) { return k + '=' + obj[k]; }).join(';');
+  const ua = [];
+  const rest = [];
+  Object.keys(obj).forEach(function (k) {
+    if (k.toLowerCase() === 'user-agent' && /^jdapp(;|$)/i.test(String(obj[k]))) ua.push(k);
+    else rest.push(k);
+  });
+  return rest.map(function (k) { return k + '=' + obj[k]; })
+    .concat(ua.map(function (k) { return k + '=' + obj[k]; })).join(';');
 }
 
 /* 采集上下文：请求 cookie + 响应 set-cookie 合并（响应优先，那是刚下发的） */
@@ -361,19 +403,33 @@ function http(opts) {
 
     const method = String(opts.method || 'GET').toUpperCase();
     try {
-      if (typeof $task !== 'undefined' && $task && $task.fetch) {
+      if (!NODE_LIST.join('') && typeof $task !== 'undefined' && $task && $task.fetch) {
         $task.fetch({ url: opts.url, method: method, headers: opts.headers || {}, body: opts.body || undefined })
           .then(function (r) { ok({ status: r.statusCode || r.status || 0, body: r.body || '' }); },
                 function (e) { no(new Error('网络失败: ' + (e && e.error ? e.error : e))); });
         return;
       }
       if (typeof $httpClient !== 'undefined' && $httpClient) {
-        const fn = $httpClient[method.toLowerCase()] || $httpClient.get;
-        fn({ url: opts.url, headers: opts.headers || {}, body: opts.body || undefined },
-          function (err, resp, body) {
-            if (err) return no(new Error('网络失败: ' + err));
+        /* PUT fallback：Loon 无 $httpClient.put 时用 post（绝不降成 get）。 */
+        const fn = (method === 'PUT')
+          ? (typeof $httpClient.put === 'function' ? $httpClient.put : $httpClient.post)
+          : (typeof $httpClient[method.toLowerCase()] === 'function' ? $httpClient[method.toLowerCase()] : $httpClient.get);
+        const base = { url: opts.url, headers: opts.headers || {}, body: opts.body || undefined };
+        /* 节点候选链（2026-11-25）：逐个试 NODE_LIST，任一成功即锁定该节点。
+           policy 错误在某些 Loon 版本只弹窗不进 err 回调 ⇒ 只能靠"实际请求是否成功"判定。 */
+        const candidates = opts.noNode ? [''] : ((NODE_LOCK !== null) ? [NODE_LOCK] : NODE_LIST.slice());
+        const tryIdx = function (i) {
+          if (i >= candidates.length) return no(new Error('网络失败: 所有节点候选都失败 (' + candidates.join('|') + ')'));
+          const o = Object.assign({}, base);
+          const nd = candidates[i];
+          if (nd) o.node = nd;
+          fn(o, function (err, resp, body) {
+            if (err) return tryIdx(i + 1);  // 试下一个候选
+            NODE_LOCK = nd;                 // 锁定可用节点
             ok({ status: (resp && (resp.status || resp.statusCode)) || 0, body: body || '' });
           });
+        };
+        tryIdx(0);
         return;
       }
       no(new Error('Loon 无可用 HTTP 客户端'));
@@ -394,6 +450,21 @@ function parseJson(body, what) {
  * 青龙 API
  * ============================================================ */
 
+/* 面板域名兜底：主面板（tailnet，需 node）失败 → 试 panel2（家里内网，走 DIRECT 不带 node） */
+function qlTry(opts) {
+  return http(opts).catch(function (e) {
+    if (!CFG.panel2 || String(opts.url).indexOf(CFG.panel2) === 0) throw e;
+    const o2 = Object.assign({}, opts);
+    o2.url = String(opts.url).replace(CFG.panel, CFG.panel2);
+    o2.noNode = true;
+    return http(o2).then(function (r) {
+      log('panel-fallback | 主面板不通，本次改用 panel2');
+      CFG.panel = CFG.panel2;   /* 命中后本轮固定用备用，少绕一圈 */
+      return r;
+    });
+  });
+}
+
 function getToken() {
   const cached = prefGet('ql_tok', '');
   const exp = Number(prefGet('ql_tok_exp', 0));
@@ -405,7 +476,7 @@ function getToken() {
   const u = CFG.panel + '/open/auth/token?client_id=' +
     encodeURIComponent(CFG.clientId) + '&client_secret=' + encodeURIComponent(CFG.clientSecret);
 
-  return http({ url: u, method: 'GET' }).then(function (r) {
+  return qlTry({ url: u, method: 'GET' }).then(function (r) {
     const j = parseJson(r.body, '取票');
     if (!j.data || !j.data.token) {
       const hint = (!CFG.clientId || !CFG.clientSecret)
@@ -420,7 +491,7 @@ function getToken() {
 }
 
 function getEnvs(tok) {
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/envs', method: 'GET',
     headers: { Authorization: 'Bearer ' + tok },
   }).then(function (r) {
@@ -441,7 +512,7 @@ function findEnv(envs, name) {
 
 function putEnv(tok, rec, value) {
   /* 青龙 2.24 的 PUT /open/envs 只收 id/name/value/remarks，多传 timestamp/log_path 会 400 */
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/envs', method: 'PUT',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -457,7 +528,7 @@ function putEnv(tok, rec, value) {
 
 function runCron(tok, id) {
   if (!id) return Promise.resolve(false);
-  return http({
+  return qlTry({
     url: CFG.panel + '/open/crons/run', method: 'PUT',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify([id]),
@@ -572,7 +643,7 @@ function handleJd(ctx) {
       const v = names.join(',');
       const url = String(ctx.url || '').slice(0, 60);
       return [{
-        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断',
+        env: 'JD_HEADERS', pin: '_', cron: 0, note: '头名诊断', quiet: true,
         build: function (old) {
           const cur = String(old || '').trim();
           if (cur === v) return null;
@@ -582,18 +653,66 @@ function handleJd(ctx) {
     } catch (e) { return []; }
   })();
 
+  /* ★ 2026-11-25 wskey 探针（自动适配版）
+     京东把 wskey 藏在哪个子域一直在变（社区脚本用的是 blackhole.m.jd.com/getinfo）。
+     这里对**所有 *.jd.com** 请求记录一条 `时:分:秒 host=… n=… wskey=Y/N keys=…`（只记键名），
+     节流规则：重点域名（blackhole/perf/im-x/msg.m/wskey）或**带 wskey** 立即记；
+     其它域名同一 host 30 分钟最多一条，最多留 60 个 host —— 不刷爆青龙。 */
+  const _ckProbe = (function () {
+    try {
+      const h = String(ctx.host || '');
+      if (!/(^|\.)jd\.com$/i.test(h)) return [];
+      const ckx = ctx.cookie || {};
+      const hasW = !!ckx['wskey'];
+      const keyHost = /(^|\.)(blackhole\.m|perf\.m|im-x|msg\.m|wskey)\.jd\.com$/i.test(h);
+      const mapKey = 'ckdbg_hosts';
+      let map = {};
+      try { map = JSON.parse(prefGet(mapKey, '{}') || '{}') || {}; } catch (e) { map = {}; }
+      const lastTs = Number(map[h] || 0);
+      if (!hasW && !keyHost && NOW - lastTs < 30 * 60000) return [];
+      map[h] = NOW;
+      const hs = Object.keys(map);
+      if (hs.length > 60) {
+        hs.sort(function (a, b) { return map[a] - map[b]; })
+          .slice(0, hs.length - 60).forEach(function (x) { delete map[x]; });
+      }
+      prefSet(mapKey, JSON.stringify(map));
+      const keys = Object.keys(ckx).map(function (k) { return String(k).toLowerCase(); }).sort();
+      const d = new Date(NOW + 8 * 3600 * 1000);
+      const p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+      const stamp = p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()) + ':' + p2(d.getUTCSeconds());
+      /* 只留最近 6 条，最新在最上面 —— 一眼能看出京东到底在哪些子域上带哪些键 */
+      const line = (stamp + ' ' + h + ' n=' + keys.length + ' W=' + (hasW ? 'Y' : 'N')
+        + (hasW ? ' keys=' + keys.join(',') : '')).slice(0, 220);
+      return [{
+        env: 'JD_CKDBG', pin: '_', cron: 0, note: 'wskey探针', quiet: true,
+        build: function (old) {
+          const rows = String(old || '').split('\n')
+            .map(function (x) { return x.trim(); })
+            .filter(function (x) { return /^[0-9]{2}:[0-9]{2}:[0-9]{2}\s/.test(x) && x !== line; });
+          rows.unshift(line);
+          const out = rows.slice(0, 6).join('\n');
+          if (out === String(old || '').trim()) return null;
+          return out;
+        },
+      }];
+    } catch (e) { return []; }
+  })();
+
   const ck = ctx.cookie;
-  const pin = ck['pt_pin'] || '';
+  /* 2026-11-25：京东新版 Cookie 里账号名可能只叫 `pin`（blackhole/perf 这类域名就是），
+     pt_pin 是老的。两个都认，否则抓到 wskey 也会因为「没有 pin」被判无效。 */
+  const pin = ck['pt_pin'] || ck['pin'] || '';
   const ptKey = ck['pt_key'] || ck['light_key'] || '';
   const wskey = ck['wskey'] || '';
   if (!validPin(pin)) {
     /* 说清楚是「挡掉了」而不是「没抓到」，不然排查时一头雾水 */
     if (pin) log('jd | pin 被黑名单/格式挡掉：' + pin + '（京东测试账号会污染真实 pin）');
-    return _probe;
+    return _probe.concat(_ckProbe);
   }
-  if (!ptKey && !wskey) return _probe;
+  if (!ptKey && !wskey) return _probe.concat(_ckProbe);
 
-  const jobs = [];
+  const jobs = [].concat(_ckProbe);
   if (ptKey) {
     jobs.push({
       env: 'JD_COOKIE', pin: pin, cron: CFG.cron.jdSync,
@@ -819,7 +938,7 @@ function handleTaobao(ctx) {
       if (_seen.length > 4) _seen = _seen.slice(-4);
       prefSet('tb_seen', JSON.stringify(_seen));
       jobs.push({
-        env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断',
+        env: 'LOON_DBG', pin: '_', cron: 0, note: '诊断', quiet: true,
         build: function () { return _seen.join('\n'); },
       });
     }
@@ -1034,6 +1153,9 @@ function pickPlatform(host) {
       if (host === p.hosts[j] || host.endsWith('.' + p.hosts[j])) return p;
     }
   }
+  /* ★ 2026-11-25 自动适配：京东域名太多（wskey 到底落在哪个子域一直在变），
+     只要是 *.jd.com 就交给京东 handler；探针只记录、不乱写。 */
+  if (/(^|\.)jd\.com$/i.test(host)) return PLATFORMS[0];
   return null;
 }
 
@@ -1099,7 +1221,9 @@ function main() {
      （冷却 30 分钟管「相同输入」，这道闸门管「并发」，两件事。） */
   const gateKey = 'gate_' + plat.id;
   const gateTs = Number(prefGet(gateKey, 0));
-  if (NOW - gateTs < 3000) {
+  /* 带 wskey 的请求 / blackhole、perf 这类关键域名，优先级最高，不被 3 秒闸门吃掉 */
+  const _prio = !!(ctx.cookie['wskey'] || /(^|\.)(blackhole\.m|perf\.m)\.jd\.com$/i.test(host));
+  if (!_prio && NOW - gateTs < 3000) {
     log(plat.id + ' | skip-gate | 3 秒内已有写入，跳过（防并发覆盖）');
     finish();
     return;
@@ -1109,6 +1233,7 @@ function main() {
   let tok = '';
   const applied = [];   // [{env, value, cron}]
   const skipped = [];
+  const real = [];      // 只算真内容（排除 JD_HEADERS / JD_CKDBG / LOON_DBG 这类诊断探针）
 
   getToken()
     .then(function (t) { tok = t; return getEnvs(tok); })
@@ -1122,7 +1247,8 @@ function main() {
             skipped.push(job.env + '(不存在)');
             return null;
           }
-          const nv = job.build(String(rec.value || ''));
+          const rec_old = String(rec.value || '');
+          const nv = job.build(rec_old);
           if (nv === null || nv === undefined || nv === String(rec.value || '')) {
             skipped.push(job.env);
             return null;
@@ -1132,20 +1258,29 @@ function main() {
                否则同一轮里若有两个 job 写同一个 env，第二个还会拿旧值当 base，
                把第一个刚写的冲掉。 */
             rec.value = nv;
-            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note });
+            const isNewRow = job.pin && job.pin !== '_' && String(rec_old || '').indexOf(job.pin) === -1;
+            applied.push({ env: job.env, value: nv, cron: job.cron, note: job.note, quiet: !!job.quiet, isNew: isNewRow });
           });
         });
       });
       return chain.reduce(function (p, fn) { return p.then(fn); }, Promise.resolve());
     })
     .then(function () {
-      if (!applied.length) {
-        log(plat.id + ' | skip-same | 没变化：' + skipped.join(' / '));
+      /* 2026-11-25：诊断探针（JD_HEADERS / JD_CKDBG / LOON_DBG）不算「抓包内容」，
+         只有真正的凭证变量变了才提示 + 触发下游任务。 */
+      applied.forEach(function (a) { if (!a.quiet) real.push(a); });
+      if (!real.length) {
+        log(plat.id + ' | skip-same | 没变化：' + (skipped.concat(applied.map(function (a) { return a.env + '(诊断)'; }))).join(' / '));
         return Promise.reject({ __skip: true });
       }
-      /* 回读校验 */
+      /* 回读校验（2026-11-26：只校验真凭证，诊断探针跳过）
+         诊断探针 JD_CKDBG / JD_HEADERS / LOON_DBG 是 Loon 并发请求共写的，
+         后一个请求会把前一个刚写的值覆盖掉；回读必然偶发不一致。
+         它们不承载凭证，严格校验会把整轮采集误判为 fail、顺带吞掉任务触发，
+         所以 quiet 项只写不验（写失败也不影响凭证）。 */
       return getEnvs(tok).then(function (envs2) {
         applied.forEach(function (a) {
+          if (a.quiet) return;
           const chk = findEnv(envs2, a.env);
           if (!chk || String(chk.value || '') !== a.value) {
             throw new Error('回读校验失败：' + a.env);
@@ -1158,17 +1293,28 @@ function main() {
     })
     .then(function () {
       /* 只触发第一个非 0 的任务，避免重复跑 */
-      const cronId = (applied.map(function (a) { return a.cron; }).filter(function (x) { return x > 0; })[0]) || 0;
+      const cronId = (real.map(function (a) { return a.cron; }).filter(function (x) { return x > 0; })[0]) || 0;
       return runCron(tok, cronId).then(function (ok) { return { id: cronId, ok: ok }; });
     })
     .then(function (cronRes) {
-      const parts = applied.map(function (a) { return a.env + '(' + a.note + ')'; });
+      const parts = real.map(function (a) { return a.env + '(' + a.note + ')'; });
       const cronText = cronRes.id
         ? ('任务 ' + cronRes.id + (cronRes.ok ? ' 已触发' : ' 触发失败'))
         : '无需触发任务';
       log(plat.id + ' | done | ' + parts.join(' ｜ ') + ' | ' + cronText);
-      notify('已采集 · ' + plat.name + ' ✅', parts.join('、') + '，' + cronText,
-        'host=' + host + '\n' + (skipped.length ? '未变：' + skipped.join(' / ') : ''));
+      /* 2026-11-25：京东 App 的 pt_key 每次开屏都会换一把，照「值变了就提示」会变成天天刷屏。
+         现在只有「新账号」或「采到 JD_WSKEY」才立刻提示；其余 6 小时最多一条。 */
+      const isNewAcct = real.some(function (a) { return a.isNew; });
+      const isKeyCap = real.some(function (a) { return a.env === 'JD_WSKEY'; });
+      const lastNt = Number(prefGet('nt_' + plat.id, 0));
+      const throttled = !isNewAcct && !isKeyCap && (NOW - lastNt < 6 * 3600 * 1000);
+      if (throttled) {
+        log(plat.id + ' | done-silent | 已在 ' + Math.round((NOW - lastNt) / 60000) + ' 分钟前提示过，这次不弹');
+      } else {
+        prefSet('nt_' + plat.id, String(NOW));
+        notify('已采集 · ' + plat.name + ' ✅', parts.join('、') + '，' + cronText,
+          'host=' + host + '\n' + (skipped.length ? '未变：' + skipped.join(' / ') : ''));
+      }
       finish();
     }, function (e) {
       if (e && e.__skip) {
@@ -1178,7 +1324,20 @@ function main() {
       }
       const msg = (e && e.message) ? e.message : String(e);
       log(plat.id + ' | fail | ' + msg.slice(0, 90));
-      notify('采集失败 · ' + plat.name + ' ⚠️', msg.slice(0, 60), 'host=' + host);
+      /* 同一条错误 30 分钟内只弹一次（之前一次点击会弹两三条一模一样的「采集失败」） */
+      const fh = shortHash(msg);
+      let seen = {};
+      try { seen = JSON.parse(prefGet('failmap_' + plat.id, '{}') || '{}') || {}; } catch (e2) { seen = {}; }
+      Object.keys(seen).forEach(function (k) { if (NOW - Number(seen[k] || 0) > 30 * 60000) delete seen[k]; });
+      if (seen[fh]) {
+        log(plat.id + ' | fail-silent | 同样错误 30 分钟内已提示过');
+      } else {
+        const ks = Object.keys(seen);
+        if (ks.length > 20) delete seen[ks[0]];
+        seen[fh] = NOW;
+        prefSet('failmap_' + plat.id, JSON.stringify(seen));
+        notify('采集失败 · ' + plat.name + ' ⚠️', msg.slice(0, 60), 'host=' + host);
+      }
       finish();
     });
 }
