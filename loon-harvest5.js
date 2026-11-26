@@ -1,7 +1,8 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.8 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.9 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ *      1.9：主面板取票返回 200 但无 token（tailnet 节点假成功）时，自动改走 panel2（LAN，DIRECT）
  *      1.8：特价版只带 wskey/pin_hash 时，按 JD_COOKIE 的 unionwsws/pwdt_id 同值或 pin_hash 配对 pin，写 pin#jskey
  *      1.7：特价版纯 wskey 也收（写纯行，180 自己解析 pin）
  *      1.6：回读校验只校验真凭证，JD_CKDBG/JD_HEADERS/LOON_DBG 诊断探针不再误判整轮失败
@@ -106,7 +107,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.8',
+  version: 'harvest-1.9',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -475,20 +476,39 @@ function getToken() {
   if (!CFG.panel) {
     return Promise.reject(new Error('没配 panel —— 去 Loon 配置 [Script] 规则的 argument= 里填 panel=http://你的服务器:5711'));
   }
-  const u = CFG.panel + '/open/auth/token?client_id=' +
-    encodeURIComponent(CFG.clientId) + '&client_secret=' + encodeURIComponent(CFG.clientSecret);
+  const qs = '?client_id=' + encodeURIComponent(CFG.clientId) +
+    '&client_secret=' + encodeURIComponent(CFG.clientSecret);
+  const hint = (!CFG.clientId || !CFG.clientSecret)
+    ? '（没配 cid/secret —— 去 Loon 配置 [Script] 规则的 argument= 里填）'
+    : '';
 
-  return qlTry({ url: u, method: 'GET' }).then(function (r) {
-    const j = parseJson(r.body, '取票');
-    if (!j.data || !j.data.token) {
-      const hint = (!CFG.clientId || !CFG.clientSecret)
-        ? '（没配 cid/secret —— 去 Loon 配置 [Script] 规则的 argument= 里填）'
-        : '';
-      throw new Error('鉴权失败 HTTP ' + r.status + hint + ' ' + String(r.body).slice(0, 60));
+  /* 2026-11-26：tailnet 节点偶尔会「假成功」——回调 err=null、HTTP 200、body={}。
+     以前只按网络错误切 panel2，这种 200 {} 会直接判鉴权失败；现在按「有没有 token」切。 */
+  function tokenOnce(base, noNode) {
+    return http({ url: base + '/open/auth/token' + qs, method: 'GET', noNode: !!noNode })
+      .then(function (r) {
+        let j = null;
+        try { j = JSON.parse(r.body); } catch (e) { /* ignore */ }
+        return { tok: (j && j.data && j.data.token) || '', status: r.status, body: r.body };
+      }, function (e) {
+        return { tok: '', status: 0, body: String(e && e.message ? e.message : e) };
+      });
+  }
+
+  return tokenOnce(CFG.panel, false).then(function (r) {
+    if (r.tok) return r.tok;
+    if (CFG.panel2 && CFG.panel !== CFG.panel2) {
+      log('panel-fallback | 主面板取票无 token（HTTP ' + r.status + '），改走 panel2');
+      return tokenOnce(CFG.panel2, true).then(function (r2) {
+        if (r2.tok) { CFG.panel = CFG.panel2; return r2.tok; }
+        throw new Error('鉴权失败 HTTP ' + r2.status + hint + ' ' + String(r2.body).slice(0, 60));
+      });
     }
-    prefSet('ql_tok', j.data.token);
+    throw new Error('鉴权失败 HTTP ' + r.status + hint + ' ' + String(r.body).slice(0, 60));
+  }).then(function (tok) {
+    prefSet('ql_tok', tok);
     prefSet('ql_tok_exp', NOW + CFG.tokenTTL);
-    return j.data.token;
+    return tok;
   });
 }
 
