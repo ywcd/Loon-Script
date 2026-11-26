@@ -104,7 +104,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.7',
+  version: 'harvest-1.8',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -582,6 +582,54 @@ function upsertRow(value, pin, payload) {
   return joinLines(rows);
 }
 
+
+/* 2026-11-26：特价版只给 wskey + pin_hash，没有 pt_pin。
+   用 JD_COOKIE 已有账号做配对：同值 cookie（unionwsws 等）优先，其次 pin_hash（Java hash）。
+   配不上就退回纯 jskey 行，交给 180 自己解析 pin。 */
+function jdJavaHash(text) {
+  const s = String(text);
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return String(h);
+}
+function jdSafeDecode(v) {
+  const s = String(v || '');
+  if (s.indexOf('%') < 0) return s;
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+function jdPinFromEnvs(envs, ck) {
+  const list = envs || [];
+  let rec = null;
+  for (let i = 0; i < list.length; i += 1) {
+    if (list[i].name === 'JD_COOKIE') { rec = list[i]; break; }
+  }
+  if (!rec) return '';
+  const rows = splitLines(rec.value);
+  if (!rows.length) return '';
+  const keys = ['unionwsws', 'pwdt_id', 'mba_muid', 'uuid'];
+  for (let k = 0; k < keys.length; k += 1) {
+    const name = keys[k];
+    const want = ck[name];
+    if (!want) continue;
+    const hits = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const m = new RegExp('(?:^|;)\\s*' + name + '=([^;]+)').exec(rows[i].cookie || '');
+      if (m && m[1].trim() === String(want).trim()) hits.push(rows[i].pin);
+    }
+    if (hits.length === 1) return hits[0];
+  }
+  const hash = ck['pin_hash'];
+  if (hash) {
+    const hits = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      if (jdJavaHash(jdSafeDecode(rows[i].pin)) === String(hash)) hits.push(rows[i].pin);
+    }
+    if (hits.length === 1) return hits[0];
+  }
+  if (rows.length === 1) return rows[0].pin;
+  return '';
+}
+
 /* JD_WSKEY 专用：允许「纯 wskey」行（无 pin）。
    特价版 App 只给 wskey，不给 pt_pin；180 的 parse_wskey_blob 支持纯行，
    换 CK 时从 genToken 结果里拿 pt_pin。
@@ -763,13 +811,24 @@ function handleJd(ctx) {
     log('jd | 有 pt_key 但没有 pin，无法按键合并 JD_COOKIE，跳过这一轮（等带 pin 的请求）');
   }
   if (wskey) {
-    jobs.push({
+    const wskeyJob = {
       env: 'JD_WSKEY', pin: pinOk ? pin : '',
       /* 只有 wskey 时走换 CK；有 pt_key 就不必再烧一次 genToken */
       cron: ptKey ? 0 : CFG.cron.jdConvert,
       note: 'wskey',
-      build: function (old) { return upsertWskeyLine(old, pinOk ? pin : '', wskey); },
-    });
+      build: function (old, envs) {
+        let p = pinOk ? pin : '';
+        if (!p) {
+          p = jdPinFromEnvs(envs, ck);
+          if (p) {
+            wskeyJob.pin = p;
+            log('jd | 无 pin 的 wskey 按 JD_COOKIE 配对到 ' + p);
+          }
+        }
+        return upsertWskeyLine(old, p, wskey);
+      },
+    };
+    jobs.push(wskeyJob);
   }
 
   /* ③ JD_DEVICE —— 手机端 App 的设备指纹（2026-11-10 加）
@@ -1284,7 +1343,7 @@ function main() {
             return null;
           }
           const rec_old = String(rec.value || '');
-          const nv = job.build(rec_old);
+          const nv = job.build(rec_old, envs);
           if (nv === null || nv === undefined || nv === String(rec.value || '')) {
             skipped.push(job.env);
             return null;
