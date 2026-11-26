@@ -1,7 +1,8 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.5 ｜ 2026-11-22 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.6 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ *      1.6：回读校验只校验真凭证，JD_CKDBG/JD_HEADERS/LOON_DBG 诊断探针不再误判整轮失败
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
  * 统一采集、统一推青龙。以后哪个脚本缺东西，只改下面 PLATFORMS 表 + 加一个
@@ -103,7 +104,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.5',
+  version: 'harvest-1.6',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -1272,9 +1273,14 @@ function main() {
         log(plat.id + ' | skip-same | 没变化：' + (skipped.concat(applied.map(function (a) { return a.env + '(诊断)'; }))).join(' / '));
         return Promise.reject({ __skip: true });
       }
-      /* 回读校验 */
+      /* 回读校验（2026-11-26：只校验真凭证，诊断探针跳过）
+         诊断探针 JD_CKDBG / JD_HEADERS / LOON_DBG 是 Loon 并发请求共写的，
+         后一个请求会把前一个刚写的值覆盖掉；回读必然偶发不一致。
+         它们不承载凭证，严格校验会把整轮采集误判为 fail、顺带吞掉任务触发，
+         所以 quiet 项只写不验（写失败也不影响凭证）。 */
       return getEnvs(tok).then(function (envs2) {
         applied.forEach(function (a) {
+          if (a.quiet) return;
           const chk = findEnv(envs2, a.env);
           if (!chk || String(chk.value || '') !== a.value) {
             throw new Error('回读校验失败：' + a.env);
