@@ -1,7 +1,8 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.9 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.9.1 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ *      1.9.1：同一 cron 加 10 分钟触发闸门（特价版并发曾 16 秒触发 180 共 17 次）
  *      1.9：主面板取票返回 200 但无 token（tailnet 节点假成功）时，自动改走 panel2（LAN，DIRECT）
  *      1.8：特价版只带 wskey/pin_hash 时，按 JD_COOKIE 的 unionwsws/pwdt_id 同值或 pin_hash 配对 pin，写 pin#jskey
  *      1.7：特价版纯 wskey 也收（写纯行，180 自己解析 pin）
@@ -107,7 +108,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.9',
+  version: 'harvest-1.9.1',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -137,6 +138,7 @@ const CFG = {
   },
 
   pushCooldown: 30 * 60 * 1000,   // 同一身份 30 分钟内不重复写
+  cronCooldown: 10 * 60 * 1000,   // 同一 cron 10 分钟内不重复触发（v1.9.1：特价版并发曾 16 秒跑 17 次）
   tokenTTL: 20 * 60 * 1000,       // 青龙 token 本地缓存
   timeout: 15000,                 // 单次 HTTP 超时，绝不静默挂住
   debug: /^(1|true|yes|on)$/i.test(String(ARG.debug || ARG.DEBUG || '')),
@@ -550,14 +552,26 @@ function putEnv(tok, rec, value) {
 
 function runCron(tok, id) {
   if (!id) return Promise.resolve(false);
+  /* 2026-11-26 v1.9.1：特价版一条请求会并发打 6~17 个（_prio 绕过 3 秒闸门），
+     每个都读旧 env → 算出新值 → 回读通过 → 各自触发同一个 cron。
+     实测 15:21:00~15:21:16 把 180 连跑 17 次（日志全 code=1 no access）。
+     同一 cronId 加 10 分钟闸门；触发失败则回滚，允许下一轮重试。 */
+  const gateKey = 'cron_gate_' + id;
+  const last = Number(prefGet(gateKey, 0));
+  if (last && NOW - last < CFG.cronCooldown) {
+    log('cron-skip | 任务 ' + id + ' 已在 ' + Math.round((NOW - last) / 1000) + ' 秒前触发，跳过重复');
+    return Promise.resolve(true);
+  }
+  prefSet(gateKey, String(NOW));
   return qlTry({
     url: CFG.panel + '/open/crons/run', method: 'PUT',
     headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify([id]),
   }).then(function (r) {
     const j = parseJson(r.body, '触发任务');
+    if (j.code !== 200) prefSet(gateKey, '0');   // 触发失败回滚，下轮还能试
     return j.code === 200;
-  }).catch(function () { return false; });
+  }).catch(function () { prefSet(gateKey, '0'); return false; });
 }
 
 /* ============================================================
