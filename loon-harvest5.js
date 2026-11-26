@@ -104,7 +104,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.6',
+  version: 'harvest-1.7',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -582,6 +582,35 @@ function upsertRow(value, pin, payload) {
   return joinLines(rows);
 }
 
+/* JD_WSKEY 专用：允许「纯 wskey」行（无 pin）。
+   特价版 App 只给 wskey，不给 pt_pin；180 的 parse_wskey_blob 支持纯行，
+   换 CK 时从 genToken 结果里拿 pt_pin。
+   ⚠️ 不能走 splitLines/upsertRow —— 它们会把不含 # 的纯行直接丢掉。 */
+function upsertWskeyLine(value, pin, payload) {
+  const lines = String(value || '').split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] === payload) return null;
+    if (lines[i].slice(-(payload.length + 1)) === '#' + payload) return null;
+  }
+  if (pin) {
+    for (let i = 0; i < lines.length; i++) {
+      const k = lines[i].indexOf('#');
+      if (k > 0 && lines[i].slice(0, k).trim() === pin) {
+        lines[i] = pin + '#' + payload;
+        return lines.join('\n');
+      }
+    }
+    lines.push(pin + '#' + payload);
+    return lines.join('\n');
+  }
+  /* 无 pin：若有旧的纯行就替换（同一台手机换号重登，旧票已废），否则追加 */
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf('#') < 0) { lines[i] = payload; return lines.join('\n'); }
+  }
+  lines.push(payload);
+  return lines.join('\n');
+}
+
 /*
  * 按键合并：以已有 cookie 为底，只把凭证键盖上去。
  * 京东那 38 个指纹键（3AB9D23F7A4B3C9B / __jdv / ipLoc-djd …）一个都不能丢，
@@ -705,15 +734,20 @@ function handleJd(ctx) {
   const pin = ck['pt_pin'] || ck['pin'] || '';
   const ptKey = ck['pt_key'] || ck['light_key'] || '';
   const wskey = ck['wskey'] || '';
-  if (!validPin(pin)) {
+  const pinOk = validPin(pin);
+  if (!pinOk) {
     /* 说清楚是「挡掉了」而不是「没抓到」，不然排查时一头雾水 */
     if (pin) log('jd | pin 被黑名单/格式挡掉：' + pin + '（京东测试账号会污染真实 pin）');
-    return _probe.concat(_ckProbe);
+    if (!wskey) return _probe.concat(_ckProbe);
+    /* 2026-11-26：京东特价版（以及新版 App）的 api.m.jd.com 只带 wskey + pin_hash，
+       没有 pt_pin/pin。原逻辑在这里直接 return，wskey 永远写不进 JD_WSKEY。
+       现在改成写「纯 wskey 行」，180 换 CK 时会从 genToken 的 pt_pin 反推账号。 */
+    log('jd | 无 pin 只带 wskey（特价版）→ 写纯 wskey 行，交给 180 解析账号');
   }
   if (!ptKey && !wskey) return _probe.concat(_ckProbe);
 
   const jobs = [].concat(_ckProbe);
-  if (ptKey) {
+  if (ptKey && pinOk) {
     jobs.push({
       env: 'JD_COOKIE', pin: pin, cron: CFG.cron.jdSync,
       note: 'cookie',
@@ -725,14 +759,16 @@ function handleJd(ctx) {
         return upsertRow(old, pin, merged);
       },
     });
+  } else if (ptKey) {
+    log('jd | 有 pt_key 但没有 pin，无法按键合并 JD_COOKIE，跳过这一轮（等带 pin 的请求）');
   }
   if (wskey) {
     jobs.push({
-      env: 'JD_WSKEY', pin: pin,
+      env: 'JD_WSKEY', pin: pinOk ? pin : '',
       /* 只有 wskey 时走换 CK；有 pt_key 就不必再烧一次 genToken */
       cron: ptKey ? 0 : CFG.cron.jdConvert,
       note: 'wskey',
-      build: function (old) { return upsertRow(old, pin, wskey); },
+      build: function (old) { return upsertWskeyLine(old, pinOk ? pin : '', wskey); },
     });
   }
 
@@ -849,7 +885,7 @@ function handleJd(ctx) {
   if (!dev[3] && dev[2]) dev[3] = dev[2];
 
   const devOk = dev[1] && dev[2] && dev[3];   /* uuid + eid + wg 才是风控三件套 */
-  if (devOk) {
+  if (devOk && pinOk) {
     const row = [pin].concat(dev.map(function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); })).join('#');
     jobs.push({
       env: 'JD_DEVICE', pin: pin, cron: 0, note: '设备指纹',
@@ -892,7 +928,7 @@ function handleJd(ctx) {
     const area = _val(['gps_area', 'area', 'un_area', 'lbsArea']);
     const lng = _val(['lng', 'longitude']);
     const lat = _val(['lat', 'latitude']);
-    if (!area && !lng && !lat && !_ttt) return;
+    if (!pinOk || (!area && !lng && !lat && !_ttt)) return;   /* 无 pin 不写 JD_LOCATION，避免空 pin 行 */
     const clean = function (x) { return String(x || '').replace(/[#\n\r]/g, ' '); };
     const row = [pin, clean(area), clean(lng), clean(lat), clean(_ttt)].join('#');
     jobs.push({
