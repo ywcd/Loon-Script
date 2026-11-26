@@ -1,7 +1,9 @@
 /**
  * loon-harvest.js —— Loon 凭证采集器（手机 App → 青龙）
  * ============================================================
- * v1.6 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ * v1.8 ｜ 2026-11-26 ｜ 凭据走 Loon argument，文件本身可公开
+ *      1.8：特价版只带 wskey/pin_hash 时，按 JD_COOKIE 的 unionwsws/pwdt_id 同值或 pin_hash 配对 pin，写 pin#jskey
+ *      1.7：特价版纯 wskey 也收（写纯行，180 自己解析 pin）
  *      1.6：回读校验只校验真凭证，JD_CKDBG/JD_HEADERS/LOON_DBG 诊断探针不再误判整轮失败
  *
  * 为什么叫 harvest：这一个脚本把**所有只能在手机上拿到**的凭证
