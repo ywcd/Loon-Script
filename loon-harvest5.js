@@ -108,7 +108,7 @@ function currentSsid() {
 }
 
 const CFG = {
-  version: 'harvest-1.9.1',
+  version: 'harvest-1.10',
 
   /* 青龙面板 —— 手机要和服务器同一局域网（京东 Mesh 后面也能通，走 NAT） */
   panel: ARG.panel || ARG.PANEL || '',
@@ -139,7 +139,7 @@ const CFG = {
 
   pushCooldown: 30 * 60 * 1000,   // 同一身份 30 分钟内不重复写
   cronCooldown: 10 * 60 * 1000,   // 同一 cron 10 分钟内不重复触发（v1.9.1：特价版并发曾 16 秒跑 17 次）
-  tokenTTL: 20 * 60 * 1000,       // 青龙 token 本地缓存
+  tokenTTL: 6 * 3600 * 1000,      // 青龙 token 本地缓存（1.10：20min→6h，减少面板往返）
   timeout: 15000,                 // 单次 HTTP 超时，绝不静默挂住
   debug: /^(1|true|yes|on)$/i.test(String(ARG.debug || ARG.DEBUG || '')),
 };
@@ -486,13 +486,20 @@ function getToken() {
 
   /* 2026-11-26：tailnet 节点偶尔会「假成功」——回调 err=null、HTTP 200、body={}。
      以前只按网络错误切 panel2，这种 200 {} 会直接判鉴权失败；现在按「有没有 token」切。 */
-  function tokenOnce(base, noNode) {
+  function tokenOnce(base, noNode, tries) {
+    tries = tries || 3;
     return http({ url: base + '/open/auth/token' + qs, method: 'GET', noNode: !!noNode })
       .then(function (r) {
         let j = null;
         try { j = JSON.parse(r.body); } catch (e) { /* ignore */ }
         return { tok: (j && j.data && j.data.token) || '', status: r.status, body: r.body };
       }, function (e) {
+        /* 1.10：网络错误重试（隧道冷启动/瞬断），400/401 这类不重试 */
+        if (tries > 1) {
+          log('panel-retry | 取票网络错误，重试（剩 ' + (tries - 1) + ' 次）：' + String(e && e.message ? e.message : e).slice(0, 60));
+          return new Promise(function (res) { setTimeout(res, 1200); })
+            .then(function () { return tokenOnce(base, noNode, tries - 1); });
+        }
         return { tok: '', status: 0, body: String(e && e.message ? e.message : e) };
       });
   }
@@ -1271,9 +1278,11 @@ function handleKdxg(ctx) {
  * ============================================================ */
 
 let doneCalled = false;
+let CUR_PLAT = '';          /* 1.10：当前平台，供 finish() 清 busy 标记 */
 function finish() {
   if (doneCalled) return;
   doneCalled = true;
+  try { if (CUR_PLAT) prefSet('busy_' + CUR_PLAT, '0'); } catch (e) { /* ignore */ }
   try { $done({}); } catch (e) { /* ignore */ }
 }
 
@@ -1305,6 +1314,19 @@ function main() {
     finish();
     return;
   }
+
+  /* 1.10：并发闸门 —— 同一平台 20 秒内只允许一个实例真跑。
+     京东 App 一次开屏会并发几十个请求，每个都全量跑一遍（取票+读变量+写变量），
+     在 Loon 里表现为「Evaluate script timeout」把请求全卡住。其余实例直接放行。 */
+  CUR_PLAT = plat.id;
+  const busyKey = 'busy_' + plat.id;
+  const busyAt = Number(prefGet(busyKey, 0)) || 0;
+  if (busyAt && NOW - busyAt < 20000) {
+    log(plat.id + ' | busy-skip | ' + Math.round((NOW - busyAt) / 1000) + 's 前已有实例在跑，本次直接放行');
+    finish();
+    return;
+  }
+  prefSet(busyKey, String(NOW));
 
   const ctx = { host: host, url: reqUrl, body: reqBody, cookie: collectCookie() };
 
@@ -1438,7 +1460,10 @@ function main() {
       const isNewAcct = real.some(function (a) { return a.isNew; });
       const isKeyCap = real.some(function (a) { return a.env === 'JD_WSKEY'; });
       const lastNt = Number(prefGet('nt_' + plat.id, 0));
-      const throttled = !isNewAcct && !isKeyCap && (NOW - lastNt < 6 * 3600 * 1000);
+      /* 1.10：成功通知默认静音（notify_ok=0）。要恢复 6 小时一条，配置里加 &notify_ok=1 */
+      const NOTIFY_OK = String(ARG.notify_ok || '0');
+      const throttled = (NOTIFY_OK === '0' && !isNewAcct)
+        || (!isNewAcct && !isKeyCap && (NOW - lastNt < 6 * 3600 * 1000));
       if (throttled) {
         log(plat.id + ' | done-silent | 已在 ' + Math.round((NOW - lastNt) / 60000) + ' 分钟前提示过，这次不弹');
       } else {
