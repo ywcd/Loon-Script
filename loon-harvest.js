@@ -791,6 +791,7 @@ function handleJd(ctx) {
             return _stamp + ' noh5st ua=' + ua + ' fn=' + fn
               + ' params=[' + names.join(',') + ']'
               + ' sigHdr=[' + hnames.join(',') + ']'
+              + ' jec=' + String(getHeader(reqHeaders, 'j-e-c') || '').slice(0, 260)
               + ' body=' + String(ctx.body || '').slice(0, 60);
           })();
       return [{
