@@ -778,17 +778,31 @@ function handleJd(ctx) {
       const _stamp = _p(_d.getUTCHours()) + ':' + _p(_d.getUTCMinutes()) + ':' + _p(_d.getUTCSeconds());
       const line = appId
         ? (_stamp + ' appid=' + appId + ' ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 70))
-        : (_stamp + ' noh5st ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 80)
-           + ' body=' + String(ctx.body || '').slice(0, 80));
+        : (function () {
+            /* v3：URL 会被截断导致看不到末尾参数，所以直接列参数名（不含值） */
+            const u = String(ctx.url || '');
+            const qs = u.indexOf('?') >= 0 ? u.slice(u.indexOf('?') + 1) : '';
+            const names = qs.split('&').map(function (x) { return x.split('=')[0]; })
+              .filter(function (x) { return x; });
+            const fn = (names.indexOf('functionId') >= 0)
+              ? (paramOf(u, '', 'functionId') || '').slice(0, 40) : '';
+            const hnames = Object.keys(reqHeaders || {}).map(function (k) { return String(k).toLowerCase(); })
+              .filter(function (k) { return /h5st|sign|^st$|^sv$|ep|x-rp|jdgs|j-e-c/.test(k); });
+            return _stamp + ' noh5st ua=' + ua + ' fn=' + fn
+              + ' params=[' + names.join(',') + ']'
+              + ' sigHdr=[' + hnames.join(',') + ']'
+              + ' body=' + String(ctx.body || '').slice(0, 60);
+          })();
       return [{
         env: 'JD_H5ST_APPID', pin: '_', cron: 0, note: 'h5st appId探针', quiet: true,
         build: function (old) {
           const rows = String(old || '').split('\n').filter(function (x) { return x.trim(); });
           /* 同一 appid 只留一条，避免同设备反复刷 */
-          const _key = appId ? ('appid=' + appId + ' ') : ('noh5st ' + ua + ' url=' + String(ctx.url || '').slice(0, 60));
+          const _key = appId ? ('appid=' + appId + ' ')
+            : ('noh5st ' + ua + ' fn=' + (paramOf(ctx.url, '', 'functionId') || '').slice(0, 40));
           if (rows.some(function (r) { return r.indexOf(_key) >= 0; })) return null;
           rows.unshift(line);
-          return rows.slice(0, 20).join('\n');
+          return rows.slice(0, 40).join('\n');
         },
       }];
     } catch (e) { return []; }
