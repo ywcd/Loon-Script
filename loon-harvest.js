@@ -792,7 +792,11 @@ function handleJd(ctx) {
               + ' params=[' + names.join(',') + ']'
               + ' sigHdr=[' + hnames.join(',') + ']'
               + ' jec=' + String(getHeader(reqHeaders, 'j-e-c') || '').slice(0, 260)
-              + ' body=' + String(ctx.body || '').slice(0, 60);
+              + ' xrp=' + String(getHeader(reqHeaders, 'x-rp-client') || '').slice(0, 30)
+              + ' jdgs=' + String(getHeader(reqHeaders, 'jdgs') || '').slice(0, 20)
+              + ' refpkg=' + String(getHeader(reqHeaders, 'x-referer-package') || '').slice(0, 40)
+              + ' ph=' + String((ctx.cookie || {})['pin_hash'] || '').slice(0, 40)
+              + ' body=' + String(ctx.body || '').slice(0, 70);
           })();
       return [{
         env: 'JD_H5ST_APPID', pin: '_', cron: 0, note: 'h5st appId探针', quiet: true,
