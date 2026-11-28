@@ -764,23 +764,29 @@ function handleJd(ctx) {
     try {
       const h = String(ctx.host || '');
       if (!/(^|\.)jd\.com$/i.test(h)) return [];
-      let h5 = paramOf(ctx.url, '', 'h5st') || getHeader(reqHeaders, 'h5st') || getHeader(reqHeaders, 'x-h5st') || '';
-      if (!h5) return [];
+      /* 2026-11-28 v2：h5st 可能不在 URL 而在 POST body 里（api.m.jd.com 多为 POST），
+         所以 url / body / header 三处都查。查不到也不静默返回 —— 记一条 noh5st 诊断行，
+         带上 URL 与 body 前 80 字符，用来判断「脚本没生效」还是「请求真不带 h5st」。 */
+      let h5 = paramOf(ctx.url, ctx.body, 'h5st') || getHeader(reqHeaders, 'h5st') || getHeader(reqHeaders, 'x-h5st') || '';
       try { h5 = decodeURIComponent(h5); } catch (e) {}
       const seg = String(h5).split(';');
-      const appId = (seg[1] || '').trim();
-      if (!appId) return [];
+      let appId = (seg[1] || '').trim();
+      if (!/^[A-Za-z0-9_-]{5,40}$/.test(appId)) appId = '';
       const ua = String(getHeader(reqHeaders, 'user-agent') || '').slice(0, 20);
       const _d = new Date(NOW + 8 * 3600 * 1000);
       const _p = function (n) { return (n < 10 ? '0' : '') + n; };
       const _stamp = _p(_d.getUTCHours()) + ':' + _p(_d.getUTCMinutes()) + ':' + _p(_d.getUTCSeconds());
-      const line = _stamp + ' appid=' + appId + ' ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 70);
+      const line = appId
+        ? (_stamp + ' appid=' + appId + ' ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 70))
+        : (_stamp + ' noh5st ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 80)
+           + ' body=' + String(ctx.body || '').slice(0, 80));
       return [{
         env: 'JD_H5ST_APPID', pin: '_', cron: 0, note: 'h5st appId探针', quiet: true,
         build: function (old) {
           const rows = String(old || '').split('\n').filter(function (x) { return x.trim(); });
           /* 同一 appid 只留一条，避免同设备反复刷 */
-          if (rows.some(function (r) { return r.indexOf('appid=' + appId + ' ') >= 0; })) return null;
+          const _key = appId ? ('appid=' + appId + ' ') : ('noh5st ' + ua + ' url=' + String(ctx.url || '').slice(0, 60));
+          if (rows.some(function (r) { return r.indexOf(_key) >= 0; })) return null;
           rows.unshift(line);
           return rows.slice(0, 20).join('\n');
         },
