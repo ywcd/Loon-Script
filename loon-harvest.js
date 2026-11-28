@@ -753,6 +753,41 @@ function countKeys(s) {
 
 /* ── 京东 ─────────────────────────────────────────────── */
 function handleJd(ctx) {
+  /* ★ 2026-11-28 h5st 探针（为 jskey→CK 找京喜 App 的 h5st appId）
+     背景：jskey 换 pt_key 只剩「h5st + 京喜自己的 appId」这一条路，
+           主站 appId（j2y2p21v7jjyie25）京东不认，京喜那个我们又不知道。
+     h5st 是 10 段分号串，第 2 段就是该 App 的 appId。
+     这里把所有 *.jd.com 请求里的 h5st（query 或 header）记到 JD_H5ST_APPID：
+       每行 `时:分:秒 appid=xxx ua=<UA前20> url=<URL前70>`
+     节流：同一 appid 只记一次（去重），最多留 20 行，不刷爆青龙。 */
+  const _h5stProbe = (function () {
+    try {
+      const h = String(ctx.host || '');
+      if (!/(^|\.)jd\.com$/i.test(h)) return [];
+      let h5 = paramOf(ctx.url, '', 'h5st') || getHeader(reqHeaders, 'h5st') || getHeader(reqHeaders, 'x-h5st') || '';
+      if (!h5) return [];
+      try { h5 = decodeURIComponent(h5); } catch (e) {}
+      const seg = String(h5).split(';');
+      const appId = (seg[1] || '').trim();
+      if (!appId) return [];
+      const ua = String(getHeader(reqHeaders, 'user-agent') || '').slice(0, 20);
+      const _d = new Date(NOW + 8 * 3600 * 1000);
+      const _p = function (n) { return (n < 10 ? '0' : '') + n; };
+      const _stamp = _p(_d.getUTCHours()) + ':' + _p(_d.getUTCMinutes()) + ':' + _p(_d.getUTCSeconds());
+      const line = _stamp + ' appid=' + appId + ' ua=' + ua + ' url=' + String(ctx.url || '').slice(0, 70);
+      return [{
+        env: 'JD_H5ST_APPID', pin: '_', cron: 0, note: 'h5st appId探针', quiet: true,
+        build: function (old) {
+          const rows = String(old || '').split('\n').filter(function (x) { return x.trim(); });
+          /* 同一 appid 只留一条，避免同设备反复刷 */
+          if (rows.some(function (r) { return r.indexOf('appid=' + appId + ' ') >= 0; })) return null;
+          rows.unshift(line);
+          return rows.slice(0, 20).join('\n');
+        },
+      }];
+    } catch (e) { return []; }
+  })();
+
   /* ★ 2026-11-10 诊断（放在最前面，任何 early-return 之前都会写）：
      把 api.m.jd.com 上带的请求头名字记到 JD_HEADERS（只记名字，不含值）。
      有了它就能判断：是「规则没触发」还是「头里没有 eid/wg」。 */
@@ -829,15 +864,15 @@ function handleJd(ctx) {
   if (!pinOk) {
     /* 说清楚是「挡掉了」而不是「没抓到」，不然排查时一头雾水 */
     if (pin) log('jd | pin 被黑名单/格式挡掉：' + pin + '（京东测试账号会污染真实 pin）');
-    if (!wskey) return _probe.concat(_ckProbe);
+    if (!wskey) return _probe.concat(_ckProbe, _h5stProbe);
     /* 2026-11-26：京东特价版（以及新版 App）的 api.m.jd.com 只带 wskey + pin_hash，
        没有 pt_pin/pin。原逻辑在这里直接 return，wskey 永远写不进 JD_WSKEY。
        现在改成写「纯 wskey 行」，180 换 CK 时会从 genToken 的 pt_pin 反推账号。 */
     log('jd | 无 pin 只带 wskey（特价版）→ 写纯 wskey 行，交给 180 解析账号');
   }
-  if (!ptKey && !wskey) return _probe.concat(_ckProbe);
+  if (!ptKey && !wskey) return _probe.concat(_ckProbe, _h5stProbe);
 
-  const jobs = [].concat(_ckProbe);
+  const jobs = [].concat(_h5stProbe, _ckProbe);
   if (ptKey && pinOk) {
     jobs.push({
       env: 'JD_COOKIE', pin: pin, cron: CFG.cron.jdSync,
